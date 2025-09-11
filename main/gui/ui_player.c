@@ -180,6 +180,20 @@ static void audio_cb(audio_player_cb_ctx_t *ctx)
 void ui_media_player(void (*fn)(void))
 {
     g_player_end_cb = fn;
+    
+    // Refresh file iterator to pick up new recordings
+    // Note: file_iterator_delete is not implemented in the component, so we just create a new one
+    file_iterator = file_iterator_new("/sdcard");
+    ESP_LOGI(TAG, "Refreshed file iterator, found %d files", file_iterator ? file_iterator_get_count(file_iterator) : 0);
+    
+    // Debug: List all files found
+    if (file_iterator) {
+        size_t count = file_iterator_get_count(file_iterator);
+        for (size_t i = 0; i < count; i++) {
+            const char *filename = file_iterator_get_name_from_index(file_iterator, i);
+            ESP_LOGI(TAG, "File %d: %s", i, filename ? filename : "NULL");
+        }
+    }
     lv_obj_t *page = lv_obj_create(lv_scr_act());
     player_page = page;
     lv_obj_set_size(page, lv_obj_get_width(lv_obj_get_parent(page)), lv_obj_get_height(lv_obj_get_parent(page)) - lv_obj_get_height(ui_main_get_status_bar()));

@@ -165,20 +165,59 @@ static void record_btn_event_cb(lv_event_t *e)
         // Start recording
         ESP_LOGI(TAG, "Starting recording...");
         
-        // Update state immediately
+        generate_filename(g_current_filename, sizeof(g_current_filename));
+        ESP_LOGI(TAG, "Generated filename: %s", g_current_filename);
+        
+        // Create recordings directory if it doesn't exist
+        mkdir("/sdcard", 0755);
+        
+        // Open file for writing
+        g_recording_file = fopen(g_current_filename, "wb");
+        if (!g_recording_file) {
+            ESP_LOGE(TAG, "Failed to open file for writing: %s", g_current_filename);
+            return;
+        }
+        
+        // Write WAV header (will be updated later with correct data size)
+        write_wav_header(g_recording_file, 16000, 2, 16, 0);
+        
+        // Set up codec for recording
+        bsp_codec_set_fs(16000, 16, I2S_SLOT_MODE_STEREO);
+        bsp_codec_mute_set(false);
+        bsp_codec_volume_set(50, NULL);
+        
+        // Update state
         g_recorder_state = RECORDER_STATE_RECORDING;
         g_recording_start_time = xTaskGetTickCount();
         g_recording_duration = 0;
         
-        // Update UI immediately
+        // Update UI
         lv_obj_set_style_bg_color(g_record_btn, lv_color_hex(0x00FF00), LV_PART_MAIN);
         lv_label_set_text(g_status_label, "Recording...");
+        lv_label_set_text(g_file_label, g_current_filename);
         
-        ESP_LOGI(TAG, "UI updated for recording start - button should be green now");
+        ESP_LOGI(TAG, "Recording started successfully");
         
     } else if (g_recorder_state == RECORDER_STATE_RECORDING) {
         // Stop recording
         ESP_LOGI(TAG, "Stopping recording...");
+        
+        if (g_recording_file) {
+            // Get file size to update WAV header
+            long file_size = ftell(g_recording_file);
+            uint32_t data_size = file_size - sizeof(wav_header_t);
+            
+            // Update WAV header with actual data size
+            fseek(g_recording_file, 0, SEEK_SET);
+            write_wav_header(g_recording_file, 16000, 2, 16, data_size);
+            fclose(g_recording_file);
+            g_recording_file = NULL;
+            
+            ESP_LOGI(TAG, "File saved: %s (size: %ld bytes)", g_current_filename, file_size);
+            
+            // List all recorded files
+            list_recorded_files();
+        }
         
         g_recorder_state = RECORDER_STATE_IDLE;
         
