@@ -27,6 +27,8 @@
 #include "ui_about_us.h"
 #include "ui_net_config.h"
 #include "ui_boot_animate.h"
+#include "ui_recorder.h"
+#include "image/icon_recorder.h"
 
 static const char *TAG = "ui_main";
 
@@ -191,6 +193,12 @@ static void net_end_cb(void)
     ui_main_menu(g_item_index);
 }
 
+static void recorder_end_cb(void)
+{
+    ESP_LOGI(TAG, "recorder end");
+    ui_main_menu(g_item_index);
+}
+
 static void ui_help(void (*fn)(void))
 {
     ui_hint_start(hint_end_cb);
@@ -209,11 +217,13 @@ LV_IMG_DECLARE(icon_dev_ctrl)
 LV_IMG_DECLARE(icon_media_player)
 LV_IMG_DECLARE(icon_help)
 LV_IMG_DECLARE(icon_network)
+LV_IMG_DECLARE(icon_recorder)
 
 static item_desc_t item[] = {
 #if CONFIG_BSP_BOARD_ESP32_S3_BOX_3
     { "Sensor Monitor", (void *) &icon_sensor_monitor,  ui_sensor_monitor_start, sensor_monitor_end_cb},
 #endif
+    { "Voice Recorder", (void *) &icon_recorder,        ui_recorder_start, recorder_end_cb},
     { "Device Control", (void *) &icon_dev_ctrl,        ui_device_ctrl_start, dev_ctrl_end_cb},
     { "Network",        (void *) &icon_network,         ui_net_config_start, net_end_cb},
     { "Media Player",   (void *) &icon_media_player,    ui_media_player, player_end_cb},
