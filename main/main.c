@@ -135,7 +135,8 @@ void app_main(void)
     vTaskDelay(pdMS_TO_TICKS(500));
     bsp_display_backlight_on();
 
-    file_iterator = file_iterator_new("/spiffs/mp3");
+    // Initialize file iterator for recordings directory
+    file_iterator = file_iterator_new("/sdcard");
     assert(file_iterator != NULL);
     audio_player_config_t config = { .mute_fn = audio_mute_function,
                                      .write_fn = bsp_i2s_write,
