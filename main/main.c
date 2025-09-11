@@ -104,11 +104,16 @@ void app_main(void)
 #if !SR_RUN_TEST && MEMORY_MONITOR
     sys_monitor_start(); // Logs should be reduced during SR testing
 #endif
+    ESP_LOGI(TAG, "=== MAIN INITIALIZATION ===");
+    ESP_LOGI(TAG, "About to mount SPIFFS...");
     bsp_spiffs_mount();
+    ESP_LOGI(TAG, "SPIFFS mounted successfully");
     
     // Mount SD card for recording
     ESP_LOGI(TAG, "=== SD CARD MOUNTING ===");
+    ESP_LOGI(TAG, "About to call bsp_sdcard_mount()...");
     esp_err_t ret = bsp_sdcard_mount();
+    ESP_LOGI(TAG, "bsp_sdcard_mount() returned: %s", esp_err_to_name(ret));
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to mount SD card: %s", esp_err_to_name(ret));
         ESP_LOGE(TAG, "SD card mount failed - recordings will not work!");
