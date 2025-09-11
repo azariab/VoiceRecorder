@@ -15,6 +15,7 @@
 #include "nvs_flash.h"
 #include "nvs.h"
 #include "bsp_storage.h"
+#include "bsp/esp-box-3.h"
 #include "settings.h"
 #include "app_led.h"
 #include "app_rmaker.h"
@@ -104,6 +105,14 @@ void app_main(void)
     sys_monitor_start(); // Logs should be reduced during SR testing
 #endif
     bsp_spiffs_mount();
+    
+    // Mount SD card for recording
+    esp_err_t ret = bsp_sdcard_mount();
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to mount SD card: %s", esp_err_to_name(ret));
+    } else {
+        ESP_LOGI(TAG, "SD card mounted successfully");
+    }
 
     bsp_i2c_init();
 
