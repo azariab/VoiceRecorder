@@ -369,7 +369,7 @@ static void menu_enter_cb(lv_event_t *e)
         menu_new_item_select(obj);
     } else if (LV_EVENT_CLICKED == code) {
         lv_obj_t *menu_btn_parent = lv_obj_get_parent(obj);
-        ESP_LOGI(TAG, "menu click, item index = %d", g_item_index);
+        ESP_LOGI(TAG, "menu click, item index = %d, item name = %s", g_item_index, item[g_item_index].name);
         if (ui_get_btn_op_group()) {
             lv_group_remove_all_objs(ui_get_btn_op_group());
         }
@@ -387,6 +387,7 @@ static void menu_enter_cb(lv_event_t *e)
 
 static void ui_main_menu(int32_t index_id)
 {
+    ESP_LOGI(TAG, "Creating main menu with %zu items, index_id=%ld", g_item_size, index_id);
     if (!g_page_menu) {
         g_page_menu = lv_obj_create(lv_scr_act());
         lv_obj_set_size(g_page_menu, lv_obj_get_width(lv_obj_get_parent(g_page_menu)), lv_obj_get_height(lv_obj_get_parent(g_page_menu)) - lv_obj_get_height(ui_main_get_status_bar()));
