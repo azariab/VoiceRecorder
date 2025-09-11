@@ -82,19 +82,22 @@ static void write_wav_header(FILE *file, uint32_t sample_rate, uint16_t channels
 
 static void list_recorded_files(void)
 {
-    ESP_LOGI(TAG, "=== Recorded Files ===");
+    ESP_LOGI(TAG, "=== RECORDED FILE VERIFICATION ===");
+    ESP_LOGI(TAG, "Checking file: %s", g_current_filename);
     
     // Check if the file we just recorded exists
     struct stat st;
     if (stat(g_current_filename, &st) == 0) {
-        ESP_LOGI(TAG, "File: %s", g_current_filename);
-        ESP_LOGI(TAG, "Size: %ld bytes", st.st_size);
-        ESP_LOGI(TAG, "File exists and is %ld bytes", st.st_size);
+        ESP_LOGI(TAG, "✅ File exists: %s", g_current_filename);
+        ESP_LOGI(TAG, "📁 File size: %ld bytes", st.st_size);
+        ESP_LOGI(TAG, "✅ Recording verification: SUCCESS");
     } else {
-        ESP_LOGI(TAG, "File not found: %s", g_current_filename);
+        ESP_LOGE(TAG, "❌ File not found: %s", g_current_filename);
+        ESP_LOGE(TAG, "❌ Recording verification: FAILED");
+        ESP_LOGE(TAG, "Check SD card mount and file system");
     }
     
-    ESP_LOGI(TAG, "=====================");
+    ESP_LOGI(TAG, "=== END FILE VERIFICATION ===");
 }
 
 static void recording_task(void *pvParameters)
@@ -169,14 +172,18 @@ static void record_btn_event_cb(lv_event_t *e)
         ESP_LOGI(TAG, "Generated filename: %s", g_current_filename);
         
         // Create recordings directory if it doesn't exist
+        ESP_LOGI(TAG, "Creating /sdcard directory if needed");
         mkdir("/sdcard", 0755);
         
         // Open file for writing
+        ESP_LOGI(TAG, "Opening file for writing: %s", g_current_filename);
         g_recording_file = fopen(g_current_filename, "wb");
         if (!g_recording_file) {
             ESP_LOGE(TAG, "Failed to open file for writing: %s", g_current_filename);
+            ESP_LOGE(TAG, "Check if SD card is mounted and accessible");
             return;
         }
+        ESP_LOGI(TAG, "File opened successfully for recording");
         
         // Write WAV header (will be updated later with correct data size)
         write_wav_header(g_recording_file, 16000, 2, 16, 0);
