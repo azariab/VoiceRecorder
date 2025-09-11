@@ -189,10 +189,16 @@ void ui_media_player(void (*fn)(void))
     // Debug: List all files found
     if (file_iterator) {
         size_t count = file_iterator_get_count(file_iterator);
+        ESP_LOGI(TAG, "=== MEDIA PLAYER FILE LIST ===");
+        ESP_LOGI(TAG, "Directory: /sdcard");
+        ESP_LOGI(TAG, "Total files found: %d", count);
         for (size_t i = 0; i < count; i++) {
             const char *filename = file_iterator_get_name_from_index(file_iterator, i);
             ESP_LOGI(TAG, "File %d: %s", i, filename ? filename : "NULL");
         }
+        ESP_LOGI(TAG, "=== END FILE LIST ===");
+    } else {
+        ESP_LOGE(TAG, "file_iterator is NULL!");
     }
     lv_obj_t *page = lv_obj_create(lv_scr_act());
     player_page = page;
