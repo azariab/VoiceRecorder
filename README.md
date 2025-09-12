@@ -1,3 +1,11 @@
+# VoiceRecorder (based on factory_demo)
+
+Current status
+- Recording: raw stereo WAV, 16 kHz, 16-bit, saved to `/sdcard/recNNN.wav`.
+- UI: basic record/stop with timer; media player lists WAVs from SD.
+- Diagnostics: extra logs enabled; SR and RainMaker disabled for stability.
+- Note: This setup is NOT yet optimal for speech. AFE (SE/AGC) is disabled; next step is mono AFE-processed output for cleaner voice.
+
 # Factory Example
 
 | Board             | Support Status |

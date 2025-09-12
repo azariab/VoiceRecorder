@@ -167,6 +167,7 @@ static void record_btn_event_cb(lv_event_t *e)
     if (g_recorder_state == RECORDER_STATE_IDLE) {
         // Start recording
         ESP_LOGI(TAG, "Starting recording...");
+        // SR disabled
         
         generate_filename(g_current_filename, sizeof(g_current_filename));
         ESP_LOGI(TAG, "Generated filename: %s", g_current_filename);
@@ -291,18 +292,25 @@ static void record_btn_event_cb(lv_event_t *e)
     } else if (g_recorder_state == RECORDER_STATE_RECORDING) {
         // Stop recording
         ESP_LOGI(TAG, "Stopping recording...");
-        
-        // Give the recording task a moment to finish current write
+        // First, signal the recording task to stop writing
+        g_recorder_state = RECORDER_STATE_IDLE;
+        // Give the recording task a moment to finish any in-flight write
         vTaskDelay(pdMS_TO_TICKS(50));
-        
+
         if (g_recording_file) {
             // Get file size to update WAV header
+            fflush(g_recording_file);
             long file_size = ftell(g_recording_file);
-            uint32_t data_size = file_size - sizeof(wav_header_t);
+            if (file_size < (long)sizeof(wav_header_t)) {
+                ESP_LOGW(TAG, "Recorded file too small (%ld), writing empty data header", file_size);
+                file_size = sizeof(wav_header_t);
+            }
+            uint32_t data_size = (uint32_t)(file_size - (long)sizeof(wav_header_t));
             
             // Update WAV header with actual data size
             fseek(g_recording_file, 0, SEEK_SET);
             write_wav_header(g_recording_file, 16000, 2, 16, data_size);
+            fflush(g_recording_file);
             fclose(g_recording_file);
             g_recording_file = NULL;
             
@@ -312,14 +320,14 @@ static void record_btn_event_cb(lv_event_t *e)
             list_recorded_files();
         }
         
-        g_recorder_state = RECORDER_STATE_IDLE;
-        
         // Update UI
         lv_obj_set_style_bg_color(g_record_btn, lv_color_hex(0xFF0000), LV_PART_MAIN);
         lv_label_set_text(g_status_label, "Ready to record");
         lv_label_set_text(g_time_label, "00:00");
         
         ESP_LOGI(TAG, "Recording stopped successfully");
+
+        // SR disabled
     }
 }
 

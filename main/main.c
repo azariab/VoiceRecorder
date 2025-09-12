@@ -190,9 +190,8 @@ void app_main(void)
     app_pwm_led_init(brd->PMOD2->row1[1], brd->PMOD2->row1[2], brd->PMOD2->row1[3]);
 #endif
 
-    ESP_LOGI(TAG, "speech recognition start");
-    vTaskDelay(pdMS_TO_TICKS(4 * 1000));
-    app_sr_start(false);
-    app_rmaker_start();
+    // Disable speech recognition and RainMaker for VoiceRecorder
+    // app_sr_start(false);
+    // app_rmaker_start();
 }
 
