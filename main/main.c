@@ -91,6 +91,7 @@ static esp_err_t audio_mute_function(AUDIO_PLAYER_MUTE_SETTING setting)
 
 void app_main(void)
 {
+    ESP_LOGI(TAG, "=== APP_MAIN STARTED ===");
     ESP_LOGI(TAG, "Compile time: %s %s", __DATE__, __TIME__);
     /* Initialize NVS. */
     esp_err_t err = nvs_flash_init();
@@ -99,7 +100,9 @@ void app_main(void)
         err = nvs_flash_init();
     }
     ESP_ERROR_CHECK(err);
+    ESP_LOGI(TAG, "NVS initialized successfully");
     ESP_ERROR_CHECK(settings_read_parameter_from_nvs());
+    ESP_LOGI(TAG, "Settings read from NVS successfully");
 
 #if !SR_RUN_TEST && MEMORY_MONITOR
     sys_monitor_start(); // Logs should be reduced during SR testing

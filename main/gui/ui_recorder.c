@@ -8,6 +8,8 @@
 #include <string.h>
 #include <time.h>
 #include <sys/stat.h>
+#include <errno.h>
+#include <dirent.h>
 #include "esp_log.h"
 #include "esp_err.h"
 #include "freertos/FreeRTOS.h"
@@ -121,9 +123,11 @@ static void recording_task(void *pvParameters)
             // Read audio data from I2S
             esp_err_t ret = bsp_i2s_read((char *)audio_buffer, audio_chunksize * channels * sizeof(int16_t), &bytes_read, portMAX_DELAY);
             if (ret == ESP_OK && bytes_read > 0) {
-                // Write to file
-                fwrite(audio_buffer, 1, bytes_read, g_recording_file);
-                fflush(g_recording_file); // Ensure data is written
+                // Double-check file is still valid before writing
+                if (g_recording_file && g_recorder_state == RECORDER_STATE_RECORDING) {
+                    fwrite(audio_buffer, 1, bytes_read, g_recording_file);
+                    fflush(g_recording_file); // Ensure data is written
+                }
             }
         } else {
             // No recording active, sleep briefly
@@ -134,14 +138,10 @@ static void recording_task(void *pvParameters)
 
 static void generate_filename(char *filename, size_t max_len)
 {
-    time_t now;
-    struct tm timeinfo;
-    time(&now);
-    localtime_r(&now, &timeinfo);
-    
-    snprintf(filename, max_len, "/sdcard/recording_%04d%02d%02d_%02d%02d%02d.wav",
-             timeinfo.tm_year + 1900, timeinfo.tm_mon + 1, timeinfo.tm_mday,
-             timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec);
+    // Use a simple counter-based filename that works with FAT filesystem
+    static int file_counter = 1;
+    snprintf(filename, max_len, "/sdcard/rec%03d.wav", file_counter++);
+    ESP_LOGI(TAG, "Generated filename: %s", filename);
 }
 
 static void timer_cb(lv_timer_t *timer)
@@ -173,13 +173,96 @@ static void record_btn_event_cb(lv_event_t *e)
         
         // Create recordings directory if it doesn't exist
         ESP_LOGI(TAG, "Creating /sdcard directory if needed");
-        mkdir("/sdcard", 0755);
+        int mkdir_result = mkdir("/sdcard", 0755);
+        ESP_LOGI(TAG, "mkdir result: %d", mkdir_result);
+        
+        // Check if directory exists and is accessible
+        struct stat dir_stat;
+        int stat_result = stat("/sdcard", &dir_stat);
+        ESP_LOGI(TAG, "stat /sdcard result: %d", stat_result);
+        if (stat_result == 0) {
+            ESP_LOGI(TAG, "/sdcard directory exists and is accessible");
+        } else {
+            ESP_LOGE(TAG, "/sdcard directory does not exist or is not accessible");
+        }
+        
+        // List existing files to check if we're hitting the max_files limit
+        ESP_LOGI(TAG, "Listing existing files on SD card...");
+        DIR *dir = opendir("/sdcard");
+        if (dir) {
+            struct dirent *entry;
+            int file_count = 0;
+            while ((entry = readdir(dir)) != NULL) {
+                if (entry->d_type == DT_REG) {  // Regular file
+                    ESP_LOGI(TAG, "Existing file: %s", entry->d_name);
+                    file_count++;
+                } else if (entry->d_type == DT_DIR) {
+                    ESP_LOGI(TAG, "Directory: %s", entry->d_name);
+                }
+            }
+            closedir(dir);
+            ESP_LOGI(TAG, "Total files on SD card: %d", file_count);
+            ESP_LOGI(TAG, "SD card max_files limit: 5 (from BSP configuration)");
+            if (file_count >= 5) {
+                ESP_LOGE(TAG, "WARNING: SD card has %d files, max_files limit is 5!", file_count);
+            }
+        } else {
+            ESP_LOGE(TAG, "Failed to open /sdcard directory");
+        }
+        
+        // Test different filename patterns
+        ESP_LOGI(TAG, "Testing different filename patterns...");
+        
+        // Test 1: Simple filename
+        FILE *test1 = fopen("/sdcard/test.txt", "w");
+        if (test1) {
+            fputs("test", test1);
+            fclose(test1);
+            ESP_LOGI(TAG, "Test 1 (test.txt): SUCCESS");
+            remove("/sdcard/test.txt");
+        } else {
+            ESP_LOGE(TAG, "Test 1 (test.txt): FAILED - %s", strerror(errno));
+        }
+        
+        // Test 2: WAV extension
+        FILE *test2 = fopen("/sdcard/test.wav", "w");
+        if (test2) {
+            fputs("test", test2);
+            fclose(test2);
+            ESP_LOGI(TAG, "Test 2 (test.wav): SUCCESS");
+            remove("/sdcard/test.wav");
+        } else {
+            ESP_LOGE(TAG, "Test 2 (test.wav): FAILED - %s", strerror(errno));
+        }
+        
+        // Test 3: Recording prefix
+        FILE *test3 = fopen("/sdcard/recording.wav", "w");
+        if (test3) {
+            fputs("test", test3);
+            fclose(test3);
+            ESP_LOGI(TAG, "Test 3 (recording.wav): SUCCESS");
+            remove("/sdcard/recording.wav");
+        } else {
+            ESP_LOGE(TAG, "Test 3 (recording.wav): FAILED - %s", strerror(errno));
+        }
+        
+        // Test 4: Numbers in filename
+        FILE *test4 = fopen("/sdcard/rec001.wav", "w");
+        if (test4) {
+            fputs("test", test4);
+            fclose(test4);
+            ESP_LOGI(TAG, "Test 4 (rec001.wav): SUCCESS");
+            remove("/sdcard/rec001.wav");
+        } else {
+            ESP_LOGE(TAG, "Test 4 (rec001.wav): FAILED - %s", strerror(errno));
+        }
         
         // Open file for writing
         ESP_LOGI(TAG, "Opening file for writing: %s", g_current_filename);
         g_recording_file = fopen(g_current_filename, "wb");
         if (!g_recording_file) {
             ESP_LOGE(TAG, "Failed to open file for writing: %s", g_current_filename);
+            ESP_LOGE(TAG, "Error: %s (errno: %d)", strerror(errno), errno);
             ESP_LOGE(TAG, "Check if SD card is mounted and accessible");
             return;
         }
@@ -208,6 +291,9 @@ static void record_btn_event_cb(lv_event_t *e)
     } else if (g_recorder_state == RECORDER_STATE_RECORDING) {
         // Stop recording
         ESP_LOGI(TAG, "Stopping recording...");
+        
+        // Give the recording task a moment to finish current write
+        vTaskDelay(pdMS_TO_TICKS(50));
         
         if (g_recording_file) {
             // Get file size to update WAV header
