@@ -18,10 +18,22 @@
 #include "bsp/esp-box-3.h"
 #include "bsp/esp-bsp.h"
 #include "bsp_board.h"
+#include "esp_afe_sr_models.h"
+#include "settings.h"
 #include "ui_recorder.h"
 #include "ui_main.h"
 
 static const char *TAG = "ui_recorder";
+// Export a simple recording lock to prevent player I2S reconfiguration during recording
+bool g_recorder_active = false;
+// Raw test mode for channel mapping
+typedef enum {
+    RAW_MODE_STEREO = 0,
+    RAW_MODE_LEFT_ONLY,
+    RAW_MODE_RIGHT_ONLY,
+    RAW_MODE_DOWNMIX
+} raw_mode_t;
+static raw_mode_t g_raw_mode = RAW_MODE_DOWNMIX;
 
 // Recording state
 typedef enum {
@@ -36,12 +48,22 @@ static lv_obj_t *g_record_btn = NULL;
 static lv_obj_t *g_status_label = NULL;
 static lv_obj_t *g_file_label = NULL;
 static lv_obj_t *g_time_label = NULL;
+static lv_obj_t *g_afe_btn = NULL;
 static lv_timer_t *g_timer = NULL;
 static uint32_t g_recording_start_time = 0;
 static uint32_t g_recording_duration = 0;
 static FILE *g_recording_file = NULL;
 static char g_current_filename[128];
 static TaskHandle_t g_recording_task = NULL;
+static lv_obj_t *g_agc_btn = NULL;
+
+// AFE controls
+static bool g_use_afe = false; // default to RAW path
+static int g_agc_mode = 0;    // default AGC OFF
+static const esp_afe_sr_iface_t *g_afe_iface = NULL; // unused when DSP only
+static esp_afe_sr_data_t *g_afe = NULL;              // unused when DSP only
+static int g_afe_feed_chunks = 0;                    // unused when DSP only
+static int g_afe_fetch_chunks = 0;                   // unused when DSP only
 
 // WAV file header structure
 typedef struct {
@@ -107,12 +129,66 @@ static void recording_task(void *pvParameters)
     ESP_LOGI(TAG, "Audio recording task started");
     
     int16_t *audio_buffer = NULL;
-    const int audio_chunksize = 512; // Samples per channel
-    const int channels = 2; // Stereo
+    int audio_chunksize = 512; // per-channel samples; may be overridden by AFE
+    const int raw_channels = 2; // stereo mic input
     size_t bytes_read;
     
-    // Allocate audio buffer
-    audio_buffer = heap_caps_malloc(audio_chunksize * channels * sizeof(int16_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    // Initialize AFE if enabled
+    int16_t *afe_out = NULL;
+    int16_t *afe_stereo = NULL;
+    int16_t *afe_feed3 = NULL;        // interleaved L,R,Ref(0) feed frame
+    int16_t *afe_accum_st = NULL;     // interleaved stereo accumulator
+    int accum_samples_per_ch = 0;
+    int feeds_since_last_fetch = 0;
+    if (g_use_afe) {
+        // SR AFE used as frontend: SE only, no AEC/VAD/WW/VC; stereo feed
+        g_afe_iface = &ESP_AFE_SR_HANDLE;
+        afe_config_t cfg = AFE_CONFIG_DEFAULT();
+        cfg.aec_init = false;
+        cfg.se_init = true;
+        cfg.vad_init = false;
+        cfg.wakenet_init = false;
+        cfg.voice_communication_init = false;
+        cfg.voice_communication_agc_init = false;
+        cfg.pcm_config.mic_num = 2;               // interleaved stereo
+        cfg.pcm_config.ref_num = 0;
+        cfg.pcm_config.total_ch_num = 2;
+        cfg.pcm_config.sample_rate = 16000;
+
+        g_afe = g_afe_iface->create_from_config(&cfg);
+        if (!g_afe) {
+            ESP_LOGE(TAG, "AFE create failed, falling back to raw stereo");
+            g_use_afe = false;
+        } else {
+            g_afe_feed_chunks = g_afe_iface->get_feed_chunksize(g_afe);
+            g_afe_fetch_chunks = g_afe_iface->get_fetch_chunksize(g_afe);
+            if (g_afe_feed_chunks > 0) audio_chunksize = g_afe_feed_chunks;
+            ESP_LOGI(TAG, "AFE ready: fs=%dHz mic_ch=%d total_ch=%d feed=%d fetch=%d",
+                     g_afe_iface->get_samp_rate(g_afe),
+                     g_afe_iface->get_channel_num(g_afe),
+                     g_afe_iface->get_total_channel_num(g_afe),
+                     g_afe_feed_chunks, g_afe_fetch_chunks);
+            if (g_afe_fetch_chunks % g_afe_feed_chunks != 0) {
+                ESP_LOGW(TAG, "AFE fetch (%d) not multiple of feed (%d); will accumulate", g_afe_fetch_chunks, g_afe_feed_chunks);
+            }
+            afe_out = heap_caps_malloc(g_afe_fetch_chunks * sizeof(int16_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+            if (!afe_out) {
+                ESP_LOGE(TAG, "AFE out buffer alloc failed; fallback to raw");
+                g_use_afe = false;
+            }
+            if (g_use_afe) {
+                afe_stereo = heap_caps_malloc(g_afe_fetch_chunks * 2 * sizeof(int16_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+                afe_accum_st = heap_caps_malloc(g_afe_feed_chunks * 2 * 16 * sizeof(int16_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+                if (!afe_stereo || !afe_accum_st) {
+                    ESP_LOGE(TAG, "AFE buffers alloc failed; fallback to raw");
+                    g_use_afe = false;
+                }
+            }
+        }
+    }
+
+    // Allocate I2S input buffer (stereo)
+    audio_buffer = heap_caps_malloc(audio_chunksize * raw_channels * sizeof(int16_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     if (!audio_buffer) {
         ESP_LOGE(TAG, "Failed to allocate audio buffer");
         vTaskDelete(NULL);
@@ -121,12 +197,71 @@ static void recording_task(void *pvParameters)
     while (1) {
         if (g_recorder_state == RECORDER_STATE_RECORDING && g_recording_file) {
             // Read audio data from I2S
-            esp_err_t ret = bsp_i2s_read((char *)audio_buffer, audio_chunksize * channels * sizeof(int16_t), &bytes_read, portMAX_DELAY);
+            esp_err_t ret = bsp_i2s_read((char *)audio_buffer, audio_chunksize * raw_channels * sizeof(int16_t), &bytes_read, portMAX_DELAY);
             if (ret == ESP_OK && bytes_read > 0) {
                 // Double-check file is still valid before writing
                 if (g_recording_file && g_recorder_state == RECORDER_STATE_RECORDING) {
-                    fwrite(audio_buffer, 1, bytes_read, g_recording_file);
-                    fflush(g_recording_file); // Ensure data is written
+                    if (g_use_afe && g_afe && afe_out && afe_stereo && afe_accum_st) {
+                        int samples_per_ch = bytes_read / sizeof(int16_t) / raw_channels;
+                        // Append interleaved stereo into accumulator
+                        int max_samples_per_ch = g_afe_feed_chunks * 8;
+                        int copy = samples_per_ch;
+                        if (accum_samples_per_ch + copy > max_samples_per_ch) copy = max_samples_per_ch - accum_samples_per_ch;
+                        if (copy > 0) {
+                            memcpy(&afe_accum_st[accum_samples_per_ch * 2], audio_buffer, copy * 2 * sizeof(int16_t));
+                            accum_samples_per_ch += copy;
+                        }
+                        // Feed exact frames of size feed_chunks per channel (stereo interleaved)
+                        while (accum_samples_per_ch >= g_afe_feed_chunks) {
+                            g_afe_iface->feed(g_afe, afe_accum_st);
+                            // Shift accumulator by one feed frame (stereo)
+                            int remain_per_ch = accum_samples_per_ch - g_afe_feed_chunks;
+                            if (remain_per_ch > 0) {
+                                memmove(afe_accum_st, &afe_accum_st[g_afe_feed_chunks * 2], remain_per_ch * 2 * sizeof(int16_t));
+                            }
+                            accum_samples_per_ch = remain_per_ch;
+                            // Drain processed frames (mono -> duplicate to stereo)
+                            for (;;) {
+                                afe_fetch_result_t *res = g_afe_iface->fetch(g_afe);
+                                if (!res) { ESP_LOGD(TAG, "AFE fetch: res=NULL"); break; }
+                                if (res->ret_value != ESP_OK) { ESP_LOGW(TAG, "AFE fetch ret=%d", res->ret_value); break; }
+                                if (!res->data || res->data_size <= 0) { ESP_LOGD(TAG, "AFE fetch: no data (size=%d)", (int)res->data_size); break; }
+                                int mono_samples = res->data_size / sizeof(int16_t);
+                                for (int s = 0; s < mono_samples; s++) {
+                                    int16_t v = res->data[s];
+                                    afe_stereo[2 * s + 0] = v;
+                                    afe_stereo[2 * s + 1] = v;
+                                }
+                                size_t wrote = fwrite(afe_stereo, sizeof(int16_t) * 2, mono_samples, g_recording_file);
+                                ESP_LOGI(TAG, "AFE wrote %d stereo samples", (int)wrote);
+                                feeds_since_last_fetch = 0;
+                            }
+                        }
+                    } else {
+                        // RAW test path: choose how to write from L/R
+                        int samples = bytes_read / sizeof(int16_t) / raw_channels;
+                        if (g_raw_mode == RAW_MODE_STEREO) {
+                            fwrite(audio_buffer, 1, bytes_read, g_recording_file);
+                        } else {
+                            for (int i = 0; i < samples; i++) {
+                                int16_t l = audio_buffer[2 * i + 0];
+                                int16_t r = audio_buffer[2 * i + 1];
+                                int16_t vL = l, vR = r;
+                                switch (g_raw_mode) {
+                                    case RAW_MODE_LEFT_ONLY:  vL = l; vR = l; break;
+                                    case RAW_MODE_RIGHT_ONLY: vL = r; vR = r; break;
+                                    case RAW_MODE_DOWNMIX:    {
+                                        int16_t m = (int16_t)(((int32_t)l + (int32_t)r) / 2);
+                                        vL = m; vR = m; break;
+                                    }
+                                    default: break;
+                                }
+                                fwrite(&vL, sizeof(int16_t), 1, g_recording_file);
+                                fwrite(&vR, sizeof(int16_t), 1, g_recording_file);
+                            }
+                        }
+                        fflush(g_recording_file);
+                    }
                 }
             }
         } else {
@@ -167,6 +302,9 @@ static void record_btn_event_cb(lv_event_t *e)
     if (g_recorder_state == RECORDER_STATE_IDLE) {
         // Start recording
         ESP_LOGI(TAG, "Starting recording...");
+        // Disallow changing AFE during recording
+        if (g_afe_btn) lv_obj_add_state(g_afe_btn, LV_STATE_DISABLED);
+        if (g_agc_btn) lv_obj_add_state(g_agc_btn, LV_STATE_DISABLED);
         // SR disabled
         
         generate_filename(g_current_filename, sizeof(g_current_filename));
@@ -270,7 +408,12 @@ static void record_btn_event_cb(lv_event_t *e)
         ESP_LOGI(TAG, "File opened successfully for recording");
         
         // Write WAV header (will be updated later with correct data size)
+        // Write stereo header to maximize player compatibility; duplicate mono AFE into L/R
         write_wav_header(g_recording_file, 16000, 2, 16, 0);
+        // Reset AFE ring buffer at start to avoid stale frames
+        if (g_use_afe && g_afe && g_afe_iface && g_afe_iface->reset_buffer) {
+            g_afe_iface->reset_buffer(g_afe);
+        }
         
         // Set up codec for recording
         bsp_codec_set_fs(16000, 16, I2S_SLOT_MODE_STEREO);
@@ -279,6 +422,7 @@ static void record_btn_event_cb(lv_event_t *e)
         
         // Update state
         g_recorder_state = RECORDER_STATE_RECORDING;
+        g_recorder_active = true;
         g_recording_start_time = xTaskGetTickCount();
         g_recording_duration = 0;
         
@@ -313,6 +457,13 @@ static void record_btn_event_cb(lv_event_t *e)
             fflush(g_recording_file);
             fclose(g_recording_file);
             g_recording_file = NULL;
+            // Drain any remaining AFE frames after stop
+            if (g_use_afe && g_afe && g_afe_iface) {
+                for (int i = 0; i < 3; i++) {
+                    afe_fetch_result_t *res = g_afe_iface->fetch(g_afe);
+                    if (!res || res->ret_value != ESP_OK || !res->data || res->data_size <= 0) break;
+                }
+            }
             
             ESP_LOGI(TAG, "File saved: %s (size: %ld bytes)", g_current_filename, file_size);
             
@@ -324,11 +475,56 @@ static void record_btn_event_cb(lv_event_t *e)
         lv_obj_set_style_bg_color(g_record_btn, lv_color_hex(0xFF0000), LV_PART_MAIN);
         lv_label_set_text(g_status_label, "Ready to record");
         lv_label_set_text(g_time_label, "00:00");
+        if (g_afe_btn) lv_obj_clear_state(g_afe_btn, LV_STATE_DISABLED);
+        if (g_agc_btn) lv_obj_clear_state(g_agc_btn, LV_STATE_DISABLED);
         
         ESP_LOGI(TAG, "Recording stopped successfully");
+        g_recorder_active = false;
 
         // SR disabled
     }
+}
+
+static void afe_btn_event_cb(lv_event_t *e)
+{
+    if (g_recorder_state == RECORDER_STATE_RECORDING) {
+        ESP_LOGW(TAG, "Cannot toggle AFE while recording. Stop first.");
+        return;
+    }
+    g_use_afe = !g_use_afe;
+    const char *txt = g_use_afe ? "AFE: ON" : "AFE: OFF";
+    lv_obj_t *label = lv_obj_get_child(g_afe_btn, 0);
+    if (label) lv_label_set_text(label, txt);
+    ESP_LOGI(TAG, "AFE toggle -> %s", txt);
+}
+
+static void agc_btn_event_cb(lv_event_t *e)
+{
+    if (g_recorder_state == RECORDER_STATE_RECORDING) {
+        ESP_LOGW(TAG, "Cannot toggle AGC while recording. Stop first.");
+        return;
+    }
+    g_agc_mode = (g_agc_mode + 1) % 3; // 0->1->2->0
+    const char *txt = (g_agc_mode == 0) ? "AGC: OFF" : (g_agc_mode == 1 ? "AGC: LOW" : "AGC: MED");
+    lv_obj_t *label = lv_obj_get_child(g_agc_btn, 0);
+    if (label) lv_label_set_text(label, txt);
+    ESP_LOGI(TAG, "AGC mode -> %s", txt);
+}
+
+static void lr_btn_event_cb(lv_event_t *e)
+{
+    if (g_recorder_state == RECORDER_STATE_RECORDING) {
+        ESP_LOGW(TAG, "Cannot toggle L/R test while recording. Stop first.");
+        return;
+    }
+    g_raw_mode = (raw_mode_t)(((int)g_raw_mode + 1) % 4);
+    const char *txt = (g_raw_mode == RAW_MODE_STEREO) ? "RAW: ST" :
+                      (g_raw_mode == RAW_MODE_LEFT_ONLY) ? "RAW: L" :
+                      (g_raw_mode == RAW_MODE_RIGHT_ONLY) ? "RAW: R" : "RAW: M";
+    lv_obj_t *btn = (lv_obj_t *)lv_event_get_target(e);
+    lv_obj_t *label = lv_obj_get_child(btn, 0);
+    if (label) lv_label_set_text(label, txt);
+    ESP_LOGI(TAG, "Raw mode -> %s", txt);
 }
 
 static void back_btn_event_cb(lv_event_t *e)
@@ -386,26 +582,37 @@ void ui_recorder_start(void (*end_cb)(void))
     lv_obj_add_event_cb(g_record_btn, record_btn_event_cb, LV_EVENT_CLICKED, NULL);
     ESP_LOGI(TAG, "Record button created and event callback added");
     
-    // Create back button
+    // Create a right-side settings column to avoid overlapping the Back button
+    lv_obj_t *settings_col = lv_obj_create(g_recorder_screen);
+    lv_obj_set_size(settings_col, 110, 110);
+    lv_obj_align(settings_col, LV_ALIGN_TOP_RIGHT, -6, 6);
+    lv_obj_set_style_border_width(settings_col, 0, LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(settings_col, LV_OPA_TRANSP, LV_PART_MAIN);
+
+    // Back button (top-left)
     lv_obj_t *back_btn = lv_btn_create(g_recorder_screen);
     lv_obj_set_size(back_btn, 60, 30);
     lv_obj_align(back_btn, LV_ALIGN_TOP_LEFT, 10, 10);
     lv_obj_set_style_bg_color(back_btn, lv_color_hex(0x333333), LV_PART_MAIN);
-    
     lv_obj_t *back_label = lv_label_create(back_btn);
     lv_label_set_text(back_label, "Back");
     lv_obj_set_style_text_color(back_label, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
     lv_obj_set_style_text_font(back_label, &lv_font_montserrat_14, LV_PART_MAIN);
     lv_obj_center(back_label);
-    
     lv_obj_add_event_cb(back_btn, back_btn_event_cb, LV_EVENT_CLICKED, NULL);
     
     // Create timer for updating display
     g_timer = lv_timer_create(timer_cb, 100, NULL);
     ESP_LOGI(TAG, "Timer created: %p", g_timer);
+
+    // Apply provisioned settings from config (via settings.c)
+    sys_param_t *param = settings_get_parameter();
+    g_use_afe = param->rec_use_afe;
+    if (param->rec_agc_mode <= 2) g_agc_mode = param->rec_agc_mode;
+    if (param->rec_raw_mode <= 3) g_raw_mode = (raw_mode_t)param->rec_raw_mode;
     
     // Create recording task
-    BaseType_t ret = xTaskCreate(recording_task, "recording_task", 4096, NULL, 5, &g_recording_task);
+    BaseType_t ret = xTaskCreate(recording_task, "recording_task", 8192, NULL, 5, &g_recording_task);
     if (ret != pdPASS) {
         ESP_LOGE(TAG, "Failed to create recording task: %d", ret);
     } else {

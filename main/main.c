@@ -111,6 +111,8 @@ void app_main(void)
     ESP_LOGI(TAG, "About to mount SPIFFS...");
     bsp_spiffs_mount();
     ESP_LOGI(TAG, "SPIFFS mounted successfully");
+    // Load app config from /spiffs/config.json (optional)
+    ESP_ERROR_CHECK_WITHOUT_ABORT(settings_load_app_config());
     
     // Mount SD card for recording
     ESP_LOGI(TAG, "=== SD CARD MOUNTING ===");

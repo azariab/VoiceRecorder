@@ -13,6 +13,8 @@
 #include "nvs_flash.h"
 #include "nvs.h"
 #include "settings.h"
+#include "esp_spiffs.h"
+#include "json_parser.h"
 
 static const char *TAG = "settings";
 
@@ -26,6 +28,9 @@ static const sys_param_t g_default_sys_param = {
     .sr_lang = SR_LANG_EN,
     .volume = 70, // default volume is 70%
     .radar_en = true,
+    .rec_use_afe = false,
+    .rec_agc_mode = 0,
+    .rec_raw_mode = 3,
 };
 
 static esp_err_t settings_check(sys_param_t *param)
@@ -86,4 +91,54 @@ esp_err_t settings_write_parameter_to_nvs(void)
 sys_param_t *settings_get_parameter(void)
 {
     return &g_sys_param;
+}
+
+esp_err_t settings_load_app_config(void)
+{
+    // Expect /spiffs/config.json (mounted earlier in app_main)
+    FILE *f = fopen("/spiffs/config.json", "rb");
+    if (!f) {
+        // Backward compat: accept recorder_config.json
+        f = fopen("/spiffs/recorder_config.json", "rb");
+    }
+    if (!f) {
+        ESP_LOGW(TAG, "config.json not found; using defaults");
+        return ESP_OK;
+    }
+    fseek(f, 0, SEEK_END);
+    long len = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (len <= 0 || len > 4096) {
+        ESP_LOGW(TAG, "config.json size invalid: %ld", len);
+        fclose(f);
+        return ESP_OK;
+    }
+    char *buf = (char *)malloc(len + 1);
+    if (!buf) { fclose(f); return ESP_ERR_NO_MEM; }
+    fread(buf, 1, len, f);
+    buf[len] = '\0';
+    fclose(f);
+
+    jparse_ctx_t jp;
+    if (json_parse_start(&jp, buf, len) != OS_SUCCESS) {
+        free(buf);
+        return ESP_FAIL;
+    }
+    // Recording settings
+    bool bval;
+    int ival;
+    if (json_obj_get_bool(&jp, "recording.use_afe", &bval) == OS_SUCCESS) {
+        g_sys_param.rec_use_afe = bval;
+    }
+    if (json_obj_get_int(&jp, "recording.agc_mode", &ival) == OS_SUCCESS) {
+        if (ival >= 0 && ival <= 2) g_sys_param.rec_agc_mode = (uint8_t)ival;
+    }
+    if (json_obj_get_int(&jp, "recording.raw_mode", &ival) == OS_SUCCESS) {
+        if (ival >= 0 && ival <= 3) g_sys_param.rec_raw_mode = (uint8_t)ival;
+    }
+    json_parse_end(&jp);
+    free(buf);
+    ESP_LOGI(TAG, "Loaded app config: use_afe=%d agc=%d raw=%d",
+             g_sys_param.rec_use_afe, g_sys_param.rec_agc_mode, g_sys_param.rec_raw_mode);
+    return ESP_OK;
 }

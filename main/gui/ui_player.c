@@ -11,6 +11,7 @@
 #include "lvgl.h"
 #include "ui_main.h"
 #include "settings.h"
+#include "ui_recorder.h"
 
 static const char *TAG = "ui_player";
 
@@ -55,6 +56,11 @@ static void ui_player_page_vol_dec_click_cb(lv_event_t *e)
 
 static void play_present()
 {
+    extern bool g_recorder_active; // from ui_recorder.c
+    if (g_recorder_active) {
+        ESP_LOGW(TAG, "Recorder active - blocking player start to avoid I2S reconfigure");
+        return;
+    }
     char filename[128];
     if(AUDIO_PLAYER_STATE_PAUSE == audio_player_get_state()) {
         audio_player_resume();
