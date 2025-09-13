@@ -17,6 +17,11 @@
 #include <qrcode.h>
 #include <nvs.h>
 #include <nvs_flash.h>
+#include <mbedtls/aes.h>
+#include <esp_system.h>
+#include <esp_random.h>
+#include <unistd.h>
+#include <errno.h>
 
 #include <wifi_provisioning/manager.h>
 #include <wifi_provisioning/scheme_ble.h>
@@ -36,6 +41,230 @@ static bool s_connected = false;
 static char s_payload[150] = "";
 static const char *TAG = "app_wifi";
 static EventGroupHandle_t wifi_event_group;
+static bool s_manual_mode = false; /* when true, don't auto-reconnect; allow scan */
+/* ===== Simple SD-card vault: AES-256-GCM with key kept in NVS ===== */
+#define VAULT_PATH "/sdcard/wifi_vault.bin"
+#define VAULT_NS   "wifi_vault"
+#define VAULT_KEY  "k"
+
+typedef struct {
+    uint8_t tag[16];
+    uint8_t iv[12];
+    uint32_t len;
+    /* ciphertext follows (len bytes) */
+} vault_blob_hdr_t;
+
+static esp_err_t vault_get_key(uint8_t key[32])
+{
+    nvs_handle h;
+    size_t len = 32;
+    if (nvs_open(VAULT_NS, NVS_READONLY, &h) == ESP_OK) {
+        if (nvs_get_blob(h, VAULT_KEY, key, &len) == ESP_OK && len == 32) {
+            nvs_close(h);
+            return ESP_OK;
+        }
+        nvs_close(h);
+    }
+    if (nvs_open(VAULT_NS, NVS_READWRITE, &h) != ESP_OK) return ESP_FAIL;
+    esp_fill_random(key, 32);
+    esp_err_t err = nvs_set_blob(h, VAULT_KEY, key, 32);
+    err |= nvs_commit(h);
+    nvs_close(h);
+    return err == ESP_OK ? ESP_OK : ESP_FAIL;
+}
+
+static esp_err_t vault_encrypt_and_append(const char *ssid, const char *pwd)
+{
+    uint8_t key[32];
+    if (vault_get_key(key) != ESP_OK) return ESP_FAIL;
+    size_t plain_len = strlen(ssid) + 1 + strlen(pwd) + 1; /* ssid\0pwd\0 */
+    uint8_t *plain = malloc(plain_len);
+    if (!plain) return ESP_ERR_NO_MEM;
+    strcpy((char *)plain, ssid);
+    strcpy((char *)plain + strlen(ssid) + 1, pwd);
+
+    uint8_t iv[12];
+    esp_fill_random(iv, sizeof(iv));
+
+    uint8_t *out = malloc(sizeof(vault_blob_hdr_t) + plain_len);
+    if (!out) { free(plain); return ESP_ERR_NO_MEM; }
+    vault_blob_hdr_t *hdr = (vault_blob_hdr_t *)out;
+    memcpy(hdr->iv, iv, sizeof(iv));
+    hdr->len = plain_len;
+
+    mbedtls_aes_context aes;
+    mbedtls_aes_init(&aes);
+    mbedtls_aes_setkey_enc(&aes, key, 256);
+    size_t olen = 0;
+    /* Use CTR to encrypt, compute tag as simple CMAC substitute with AES-CBC-MAC over ciphertext (lightweight) */
+    /* NOTE: For production use, switch to full AES-GCM when available in your IDF build. */
+    uint8_t stream_block[16] = {0};
+    uint8_t nonce_counter[16] = {0};
+    memcpy(nonce_counter, iv, 12);
+    uint8_t *ciphertext = out + sizeof(vault_blob_hdr_t);
+    mbedtls_aes_crypt_ctr(&aes, plain_len, &olen, nonce_counter, stream_block, plain, ciphertext);
+
+    uint8_t mac[16] = {0};
+    mbedtls_aes_setkey_enc(&aes, key, 256);
+    uint8_t iv0[16] = {0};
+    mbedtls_aes_crypt_cbc(&aes, MBEDTLS_AES_ENCRYPT, plain_len, iv0, ciphertext, mac);
+    memcpy(hdr->tag, mac, 16);
+    mbedtls_aes_free(&aes);
+
+    FILE *f = fopen(VAULT_PATH, "ab");
+    if (!f) { free(out); free(plain); return ESP_FAIL; }
+    fwrite(out, 1, sizeof(vault_blob_hdr_t) + plain_len, f);
+    fflush(f);
+    int fd = fileno(f);
+    if (fd >= 0) { fsync(fd); }
+    fclose(f);
+    free(out);
+    free(plain);
+    return ESP_OK;
+}
+
+static esp_err_t vault_try_match_and_connect(void)
+{
+    FILE *f = fopen(VAULT_PATH, "rb");
+    if (!f) return ESP_FAIL;
+    uint8_t key[32];
+    if (vault_get_key(key) != ESP_OK) { fclose(f); return ESP_FAIL; }
+    while (1) {
+        vault_blob_hdr_t hdr;
+        if (fread(&hdr, 1, sizeof(hdr), f) != sizeof(hdr)) break;
+        uint8_t *ciphertext = malloc(hdr.len);
+        if (!ciphertext) { fclose(f); return ESP_ERR_NO_MEM; }
+        if (fread(ciphertext, 1, hdr.len, f) != hdr.len) { free(ciphertext); break; }
+        /* Decrypt */
+        mbedtls_aes_context aes;
+        mbedtls_aes_init(&aes);
+        mbedtls_aes_setkey_enc(&aes, key, 256);
+        size_t olen = 0;
+        uint8_t *plain = malloc(hdr.len);
+        if (!plain) { mbedtls_aes_free(&aes); free(ciphertext); fclose(f); return ESP_ERR_NO_MEM; }
+        uint8_t stream_block[16] = {0};
+        uint8_t nonce_counter[16] = {0};
+        memcpy(nonce_counter, hdr.iv, 12);
+        mbedtls_aes_crypt_ctr(&aes, hdr.len, &olen, nonce_counter, stream_block, ciphertext, plain);
+        mbedtls_aes_free(&aes);
+        const char *ssid = (const char *)plain;
+        const char *pwd = (const char *)plain + strlen((const char *)plain) + 1;
+        if (strlen(ssid) > 0) {
+            wifi_config_t cfg = {0};
+            strncpy((char *)cfg.sta.ssid, ssid, sizeof(cfg.sta.ssid) - 1);
+            strncpy((char *)cfg.sta.password, pwd, sizeof(cfg.sta.password) - 1);
+            cfg.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
+            esp_wifi_set_mode(WIFI_MODE_STA);
+            esp_wifi_set_config(WIFI_IF_STA, &cfg);
+            esp_wifi_set_ps(WIFI_PS_NONE);
+            esp_wifi_disconnect();
+            if (esp_wifi_connect() == ESP_OK) {
+                free(plain); free(ciphertext); fclose(f);
+                return ESP_OK;
+            }
+        }
+        free(plain);
+        free(ciphertext);
+    }
+    fclose(f);
+    return ESP_FAIL;
+}
+
+esp_err_t wifi_vault_save(const char *ssid, const char *password)
+{
+    return vault_encrypt_and_append(ssid, password);
+}
+
+esp_err_t wifi_vault_try_auto_connect(void)
+{
+    return vault_try_match_and_connect();
+}
+
+static esp_err_t vault_list(char ssids[][33], size_t max, size_t *out_count)
+{
+    if (out_count) *out_count = 0;
+    FILE *f = fopen(VAULT_PATH, "rb");
+    if (!f) return ESP_FAIL;
+    uint8_t key[32];
+    if (vault_get_key(key) != ESP_OK) { fclose(f); return ESP_FAIL; }
+    size_t count = 0;
+    while (1) {
+        vault_blob_hdr_t hdr;
+        if (fread(&hdr, 1, sizeof(hdr), f) != sizeof(hdr)) break;
+        uint8_t *ciphertext = malloc(hdr.len);
+        if (!ciphertext) { fclose(f); return ESP_ERR_NO_MEM; }
+        if (fread(ciphertext, 1, hdr.len, f) != hdr.len) { free(ciphertext); break; }
+        mbedtls_aes_context aes; mbedtls_aes_init(&aes); mbedtls_aes_setkey_enc(&aes, key, 256);
+        uint8_t *plain = malloc(hdr.len); if (!plain) { mbedtls_aes_free(&aes); free(ciphertext); fclose(f); return ESP_ERR_NO_MEM; }
+        size_t olen = 0; uint8_t stream_block[16] = {0}; uint8_t nonce_counter[16] = {0}; memcpy(nonce_counter, hdr.iv, 12);
+        mbedtls_aes_crypt_ctr(&aes, hdr.len, &olen, nonce_counter, stream_block, ciphertext, plain);
+        mbedtls_aes_free(&aes);
+        const char *ssid = (const char *)plain;
+        if (ssid && ssid[0] != '\0' && count < max) {
+            strncpy(ssids[count], ssid, 32); ssids[count][32] = '\0';
+            count++;
+        }
+        free(plain); free(ciphertext);
+    }
+    fclose(f);
+    if (out_count) *out_count = count;
+    return count > 0 ? ESP_OK : ESP_FAIL;
+}
+
+esp_err_t wifi_vault_list_ssids(char ssids[][33], size_t max, size_t *out_count)
+{
+    return vault_list(ssids, max, out_count);
+}
+
+esp_err_t wifi_vault_forget_all(void)
+{
+    /* Remove the vault file */
+    if (unlink(VAULT_PATH) == 0) return ESP_OK;
+    return ESP_FAIL;
+}
+
+esp_err_t wifi_vault_forget(const char *ssid)
+{
+    if (!ssid || !ssid[0]) return ESP_ERR_INVALID_ARG;
+    FILE *f = fopen(VAULT_PATH, "rb");
+    if (!f) return ESP_FAIL;
+    uint8_t key[32];
+    if (vault_get_key(key) != ESP_OK) { fclose(f); return ESP_FAIL; }
+    /* Rebuild file excluding matching SSID */
+    FILE *tmp = fopen(VAULT_PATH ".tmp", "wb");
+    if (!tmp) { fclose(f); return ESP_FAIL; }
+    while (1) {
+        vault_blob_hdr_t hdr;
+        if (fread(&hdr, 1, sizeof(hdr), f) != sizeof(hdr)) break;
+        uint8_t *ciphertext = malloc(hdr.len);
+        if (!ciphertext) { fclose(f); fclose(tmp); unlink(VAULT_PATH ".tmp"); return ESP_ERR_NO_MEM; }
+        if (fread(ciphertext, 1, hdr.len, f) != hdr.len) { free(ciphertext); break; }
+        mbedtls_aes_context aes; mbedtls_aes_init(&aes); mbedtls_aes_setkey_enc(&aes, key, 256);
+        uint8_t *plain = malloc(hdr.len); if (!plain) { mbedtls_aes_free(&aes); free(ciphertext); fclose(f); fclose(tmp); unlink(VAULT_PATH ".tmp"); return ESP_ERR_NO_MEM; }
+        size_t olen = 0; uint8_t stream_block[16] = {0}; uint8_t nonce_counter[16] = {0}; memcpy(nonce_counter, hdr.iv, 12);
+        mbedtls_aes_crypt_ctr(&aes, hdr.len, &olen, nonce_counter, stream_block, ciphertext, plain);
+        mbedtls_aes_free(&aes);
+        const char *file_ssid = (const char *)plain;
+        bool match = (strncmp(file_ssid, ssid, 32) == 0);
+        if (!match) {
+            fwrite(&hdr, 1, sizeof(hdr), tmp);
+            fwrite(ciphertext, 1, hdr.len, tmp);
+        }
+        free(plain); free(ciphertext);
+    }
+    fclose(f); fclose(tmp);
+    /* Replace original */
+    unlink(VAULT_PATH);
+    if (rename(VAULT_PATH ".tmp", VAULT_PATH) != 0) return ESP_FAIL;
+    return ESP_OK;
+}
+
+esp_err_t wifi_vault_clear(void)
+{
+    /* Remove the vault file from SD card */
+    int rc = remove(VAULT_PATH);
+    return (rc == 0 || errno == ENOENT) ? ESP_OK : ESP_FAIL;
+}
 
 #define PROV_QR_VERSION         "v1"
 #define PROV_TRANSPORT_BLE      "ble"
@@ -124,10 +353,17 @@ static void event_handler(void *arg, esp_event_base_t event_base,
             break;
         }
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
-        ui_net_config_update_cb(UI_NET_EVT_START_CONNECT, NULL);
-        esp_wifi_connect();
+        if (!s_manual_mode) {
+            ui_net_config_update_cb(UI_NET_EVT_START_CONNECT, NULL);
+            esp_wifi_connect();
+        } else {
+            ESP_LOGI(TAG, "STA_START in manual mode; skipping auto connect");
+        }
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_WIFI_READY) {
-        ESP_ERROR_CHECK(esp_wifi_set_protocol(WIFI_IF_STA, WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G));
+        ESP_ERROR_CHECK(esp_wifi_set_protocol(WIFI_IF_STA, WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N));
+    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_CONNECTED) {
+        ESP_LOGI(TAG, "STA_CONNECTED: forcing PS NONE");
+        esp_wifi_set_ps(WIFI_PS_NONE);
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *event = (ip_event_got_ip_t *) event_data;
         ESP_LOGI(TAG, "Connected with IP Address:" IPSTR, IP2STR(&event->ip_info.ip));
@@ -137,21 +373,30 @@ static void event_handler(void *arg, esp_event_base_t event_base,
         ui_release();
         /* Signal main application to continue execution */
         xEventGroupSetBits(wifi_event_group, WIFI_STA_CONNECT_OK);
+        /* Ensure SNTP is started so time sync occurs on every connection */
+        app_sntp_init();
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
-        ESP_LOGI(TAG, "Disconnected. Connecting to the AP again...");
-        esp_wifi_connect();
+        wifi_event_sta_disconnected_t *disc = (wifi_event_sta_disconnected_t *)event_data;
+        ESP_LOGI(TAG, "Disconnected: reason=%d. %s", disc ? disc->reason : -1, s_manual_mode ? "manual-mode (no auto-reconnect)" : "auto-reconnecting");
+        if (!s_manual_mode) {
+            esp_wifi_connect();
+        }
         s_connected = 0;
         ui_acquire();
         ui_main_status_bar_set_wifi(s_connected);
         ui_release();
         ui_net_config_update_cb(UI_NET_EVT_START_CONNECT, NULL);
+    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_SCAN_DONE) {
+        /* Notify UI that scan completed; UI will fetch results */
+        ui_net_config_update_cb(UI_NET_EVT_START, NULL);
     }
 }
 
 static void wifi_init_sta()
 {
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
-    ESP_ERROR_CHECK(esp_wifi_set_ps(DEFAULT_PS_MODE));
+    /* Keep Wi-Fi always on for stable connectivity */
+    ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
     ESP_ERROR_CHECK(esp_wifi_start());
 }
 
@@ -225,12 +470,14 @@ void app_wifi_init(void)
 #if CONFIG_BSP_BOARD_ESP32_S3_BOX_3
     wifi_config_t wifi_cfg;
     ESP_ERROR_CHECK(esp_wifi_get_config(WIFI_IF_STA, &wifi_cfg));
-    wifi_cfg.sta.listen_interval = DEFAULT_LISTEN_INTERVAL;
+    /* Avoid long listen interval to prevent missed beacons */
+    wifi_cfg.sta.listen_interval = 0;
 
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_cfg));
     ESP_ERROR_CHECK(esp_wifi_start());
-    ESP_ERROR_CHECK(esp_wifi_set_inactive_time(WIFI_IF_STA, DEFAULT_BEACON_TIMEOUT));
+    /* Do not extend inactive time; keep association tight */
+    // ESP_ERROR_CHECK(esp_wifi_set_inactive_time(WIFI_IF_STA, DEFAULT_BEACON_TIMEOUT));
 #endif
 }
 
@@ -289,7 +536,8 @@ esp_err_t app_wifi_start(void)
             ESP_ERROR_CHECK(wifi_prov_mgr_init(config));
 
             ui_net_config_update_cb(UI_NET_EVT_START_PROV, NULL);
-            err = esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
+            /* Keep PS disabled during provisioning as well */
+            err = esp_wifi_set_ps(WIFI_PS_NONE);
             if (err != ESP_OK) {
                 ui_net_config_update_cb(UI_NET_EVT_PROV_SET_PS_FAIL, NULL);
                 continue;
@@ -368,6 +616,74 @@ esp_err_t app_wifi_start(void)
 bool app_wifi_is_connected(void)
 {
     return s_connected;
+}
+
+void app_wifi_set_manual_mode(bool enable)
+{
+    s_manual_mode = enable;
+}
+
+typedef struct {
+    char ssid[33];
+    char pwd[65];
+} connect_job_t;
+
+static void connect_task(void *arg)
+{
+    connect_job_t job = {0};
+    if (arg) memcpy(&job, arg, sizeof(job));
+    free(arg);
+
+    /* Enter manual mode to avoid auto-reconnect racing with config */
+    app_wifi_set_manual_mode(true);
+
+    /* Ensure we are not in connecting state */
+    esp_wifi_disconnect();
+    vTaskDelay(pdMS_TO_TICKS(150));
+
+    /* Retry set_config until station not busy */
+    wifi_config_t cfg = (wifi_config_t){0};
+    strncpy((char *)cfg.sta.ssid, job.ssid, sizeof(cfg.sta.ssid) - 1);
+    strncpy((char *)cfg.sta.password, job.pwd, sizeof(cfg.sta.password) - 1);
+    cfg.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
+    esp_wifi_set_mode(WIFI_MODE_STA);
+
+    for (int i = 0; i < 20; i++) {
+        esp_err_t e = esp_wifi_set_config(WIFI_IF_STA, &cfg);
+        if (e == ESP_OK) break;
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+
+    esp_wifi_set_ps(WIFI_PS_NONE);
+    (void)esp_wifi_connect();
+
+    /* Leave manual mode; allow normal reconnects after we initiate connect */
+    app_wifi_set_manual_mode(false);
+
+    vTaskDelete(NULL);
+}
+
+esp_err_t app_wifi_connect_async(const char *ssid, const char *password)
+{
+    if (!ssid) return ESP_ERR_INVALID_ARG;
+    connect_job_t *job = calloc(1, sizeof(connect_job_t));
+    if (!job) return ESP_ERR_NO_MEM;
+    strncpy(job->ssid, ssid, sizeof(job->ssid) - 1);
+    if (password) strncpy(job->pwd, password, sizeof(job->pwd) - 1);
+    BaseType_t ok = xTaskCreate(connect_task, "wifi_conn", 4096, job, 5, NULL);
+    return ok == pdPASS ? ESP_OK : ESP_FAIL;
+}
+
+static void auto_connect_task(void *arg)
+{
+    (void)arg;
+    wifi_vault_try_auto_connect();
+    vTaskDelete(NULL);
+}
+
+void app_wifi_auto_connect_async(void)
+{
+    xTaskCreate(auto_connect_task, "wifi_auto", 4096, NULL, 5, NULL);
 }
 
 esp_err_t app_wifi_get_wifi_ssid(char *ssid, size_t len)

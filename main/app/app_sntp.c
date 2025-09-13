@@ -39,8 +39,13 @@ void sntp_sync_time(struct timeval *tv)
 
 static void time_sync_notification_cb(struct timeval *tv)
 {
-    ESP_LOGI(TAG, "Notification of a time synchronization event, sec=%lu", tv->tv_sec);
     settimeofday(tv, NULL);
+    time_t now = tv->tv_sec;
+    struct tm timeinfo;
+    localtime_r(&now, &timeinfo);
+    char buf[64];
+    strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S %Z", &timeinfo);
+    ESP_LOGI(TAG, "SNTP sync completed: %s", buf);
 }
 
 void app_sntp_init(void)
@@ -52,8 +57,10 @@ void app_sntp_init(void)
     struct tm timeinfo;
     time(&now);
     localtime_r(&now, &timeinfo);
-    // Set timezone to China Standard Time
-    setenv("TZ", "CST-8", 1);
+    // Set timezone to New Zealand (NZST/NZDT with DST rules)
+    // POSIX TZ: standard/daylight, offset (west of UTC), DST start/end
+    // NZ: UTC+12 standard, UTC+13 daylight; DST starts last Sun of Sep 02:00, ends first Sun of Apr 03:00
+    setenv("TZ", "NZST-12NZDT-13,M9.5.0/2,M4.1.0/3", 1);
     tzset();
     // Is time set? If not, tm_year will be (1970 - 1900).
     if (timeinfo.tm_year < (2016 - 1900)) {
@@ -103,8 +110,13 @@ void app_sntp_init(void)
 
 static void obtain_time(void)
 {
-
+    ESP_LOGI(TAG, "Starting SNTP time sync");
     initialize_sntp();
+    /* Log configured servers for debugging */
+    for (int i = 0; i < 3; i++) {
+        const char *srv = esp_sntp_getservername(i);
+        if (srv) ESP_LOGI(TAG, "SNTP server[%d]: %s", i, srv);
+    }
 
     // wait for time to be set
     time_t now = 0;
@@ -115,8 +127,16 @@ static void obtain_time(void)
         ESP_LOGI(TAG, "Waiting for system time to be set... (%d/%d)", retry, retry_count);
         vTaskDelay(2000 / portTICK_PERIOD_MS);
     }
-    time(&now);
-    localtime_r(&now, &timeinfo);
+    sntp_sync_status_t st = sntp_get_sync_status();
+    if (st != SNTP_SYNC_STATUS_COMPLETED) {
+        ESP_LOGE(TAG, "SNTP sync failed after %d retries. Status=%d", retry, st);
+    } else {
+        time(&now);
+        localtime_r(&now, &timeinfo);
+        char fin[64];
+        strftime(fin, sizeof(fin), "%Y-%m-%d %H:%M:%S %Z", &timeinfo);
+        ESP_LOGI(TAG, "SNTP sync OK: %s", fin);
+    }
 
 }
 
@@ -124,7 +144,7 @@ static void initialize_sntp(void)
 {
     ESP_LOGI(TAG, "Initializing SNTP");
     esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
-    esp_sntp_setservername(0, "ntp.aliyun.com");
+    esp_sntp_setservername(0, "nz.pool.ntp.org");
     esp_sntp_setservername(1, "time.asia.apple.com");
     esp_sntp_setservername(2, "pool.ntp.org");
     sntp_set_time_sync_notification_cb(time_sync_notification_cb);
