@@ -8,9 +8,12 @@ import tkinter as tk
 from tkinter import filedialog, messagebox
 
 
+# Map of LVGL image color formats to their integer values.
+# Note: These values are consistent across LVGL v8 and v9.
 LV_IMG_CF_MAP = {
     'LV_IMG_CF_TRUE_COLOR': 2,
     'LV_IMG_CF_TRUE_COLOR_ALPHA': 3,
+    'LV_IMG_CF_TRUE_COLOR_CHROMA_KEYED': 1,  # treat as true color with chroma key transparency
     'LV_IMG_CF_INDEXED_1BIT': 4,
     'LV_IMG_CF_INDEXED_2BIT': 5,
     'LV_IMG_CF_INDEXED_4BIT': 6,
@@ -23,6 +26,7 @@ LV_IMG_CF_MAP = {
 
 
 class LvglImage:
+    """Represents a decoded LVGL image header and data."""
     def __init__(self):
         self.cf_name = None
         self.cf = None
@@ -33,6 +37,7 @@ class LvglImage:
 
 
 def parse_lvgl_c_file(path):
+    """Parses an LVGL C header file to extract image data and properties."""
     with open(path, 'r', encoding='utf-8', errors='ignore') as f:
         text = f.read()
 
@@ -42,7 +47,7 @@ def parse_lvgl_c_file(path):
     cf_match = re.search(r'\.header\.cf\s*=\s*([A-Z0-9_]+)', text)
     w_match = re.search(r'\.header\.(w|width)\s*=\s*(\d+)', text)
     h_match = re.search(r'\.header\.(h|height)\s*=\s*(\d+)', text)
-    ds_match = re.search(r'\.data_size\s*=\s*(\d+)', text)
+    ds_match = re.search(r'\.data_size\s*=\s*([^,;\n]+)', text)
 
     if cf_match:
         img.cf_name = cf_match.group(1)
@@ -53,10 +58,12 @@ def parse_lvgl_c_file(path):
     if h_match:
         img.height = int(h_match.group(2))
     if ds_match:
-        img.data_size = int(ds_match.group(1))
+        ds_expr = ds_match.group(1).strip()
+        if re.fullmatch(r'\d+', ds_expr):
+            img.data_size = int(ds_expr)
+        else:
+            img.data_size = None
 
-    # Find the data array that the descriptor references.
-    # Common pattern: const uint8_t <name>_map[] = { ... };
     data_decl = re.search(r'const\s+[^;\n]*?\b(uint8_t|unsigned\s+char)\b\s+([a-zA-Z0-9_]+)\s*\[\s*\]\s*=\s*\{', text)
     data_bytes = b''
     if data_decl:
@@ -65,7 +72,6 @@ def parse_lvgl_c_file(path):
         m = arr_re.search(text)
         if m:
             body = m.group(1)
-            # Extract hex bytes like 0x12 or decimal bytes
             values = re.findall(r'0x([0-9a-fA-F]{1,2})|\b(\d{1,3})\b', body)
             buf = bytearray()
             for hx, dec in values:
@@ -81,43 +87,8 @@ def parse_lvgl_c_file(path):
     return img
 
 
-def decode_true_color_alpha_rgb565a(img, swap16=False):
-    w, h = img.width, img.height
-    if not (w and h):
-        return None
-    expected = w * h * 3
-    data = img.data_bytes
-    if len(data) < expected:
-        # try to use data_size if provided
-        if img.data_size and img.data_size <= len(data):
-            data = data[:img.data_size]
-        else:
-            return None
-
-    # Convert to RGBA8888 bytes for tkinter PhotoImage
-    out = bytearray(w * h * 4)
-    di = 0
-    oi = 0
-    for _ in range(w * h):
-        lo = data[di]
-        hi = data[di + 1]
-        a = data[di + 2]
-        di += 3
-        if swap16:
-            lo, hi = hi, lo
-        value = (hi << 8) | lo
-        r5 = (value >> 11) & 0x1F
-        g6 = (value >> 5) & 0x3F
-        b5 = value & 0x1F
-        r = (r5 * 255) // 31
-        g = (g6 * 255) // 63
-        b = (b5 * 255) // 31
-        out[oi:oi + 4] = bytes((r, g, b, a))
-        oi += 4
-    return bytes(out)
-
-
 def decode_true_color_rgb565(img, swap16=False):
+    """Decodes a True Color (RGB565) image. LV_COLOR_DEPTH=16."""
     w, h = img.width, img.height
     if not (w and h):
         return None
@@ -146,99 +117,175 @@ def decode_true_color_rgb565(img, swap16=False):
     return bytes(out)
 
 
-def decode_true_color_alpha_rgba8888(img):
+def decode_true_color_chroma_keyed_rgb565(img, chroma_key_value, swap16=False):
+    """
+    Decodes a True Color (RGB565) image with a chroma key.
+    The chroma_key_value is provided as a 16-bit integer.
+    """
     w, h = img.width, img.height
     if not (w and h):
         return None
-    expected = w * h * 4
+    expected = w * h * 2
     data = img.data_bytes
     if len(data) < expected:
         return None
-    # Assume source is RGBA8888 already
-    return bytes(data[:expected])
-
-
-def decode_true_color_rgba8888(img):
-    w, h = img.width, img.height
-    if not (w and h):
-        return None
-    expected = w * h * 4
-    data = img.data_bytes
-    if len(data) < expected:
-        return None
-    # Assume source is RGBA8888; force alpha to 255
-    out = bytearray(expected)
+    out = bytearray(w * h * 4)
     di = 0
-    for i in range(0, expected, 4):
-        r, g, b, _a = data[di:di+4]
-        out[i:i+4] = bytes((r, g, b, 255))
-        di += 4
+    oi = 0
+    
+    for _ in range(w * h):
+        lo = data[di]
+        hi = data[di + 1]
+        di += 2
+        if swap16:
+            lo, hi = hi, lo
+        value = (hi << 8) | lo
+        
+        if value == chroma_key_value:
+            r, g, b, a = 0, 0, 0, 0  # Transparent
+        else:
+            r5 = (value >> 11) & 0x1F
+            g6 = (value >> 5) & 0x3F
+            b5 = value & 0x1F
+            r = (r5 * 255) // 31
+            g = (g6 * 255) // 63
+            b = (b5 * 255) // 31
+            a = 255 # Opaque
+
+        out[oi:oi + 4] = bytes((r, g, b, a))
+        oi += 4
     return bytes(out)
 
 
-def decode_alpha_only(img, bits):
+def decode_true_color_alpha_v7_bgra(img):
+    """Decodes a LVGL v7 True Color with Alpha (BGRA) image."""
     w, h = img.width, img.height
     if not (w and h):
         return None
-    count = w * h
+    expected = w * h * 4
     data = img.data_bytes
-    # Required bytes
-    needed = (count * bits + 7) // 8
-    if len(data) < needed:
+    if len(data) < expected:
         return None
-    # Unpack MSB-first
-    mask = (1 << bits) - 1
-    out = bytearray(count * 4)
-    di = 0
+    out = bytearray(expected)
+    for i in range(0, expected, 4):
+        b, g, r, a = data[i:i+4]
+        out[i:i+4] = bytes((r, g, b, a))
+    return bytes(out)
+
+
+def decode_true_color_alpha_v8_rgba(img):
+    """Decodes a LVGL v8/v9 True Color with Alpha (RGBA) image."""
+    w, h = img.width, img.height
+    if not (w and h):
+        return None
+    expected = w * h * 4
+    data = img.data_bytes
+    if len(data) < expected:
+        return None
+    # For v8/v9, the data is already in the expected RGBA8888 format.
+    return data[:expected]
+
+
+def decode_true_color_rgba8888(img):
+    """Decodes a 32-bit True Color (RGBA8888) image. Assumes BGRA byte order."""
+    w, h = img.width, img.height
+    if not (w and h):
+        return None
+    expected = w * h * 4
+    data = img.data_bytes
+    if len(data) < expected:
+        return None
+    out = bytearray(expected)
+    for i in range(0, expected, 4):
+        b, g, r, _a = data[i:i+4]
+        out[i:i+4] = bytes((r, g, b, 255))
+    return bytes(out)
+
+
+def decode_alpha_to_grayscale(img, bits):
+    """
+    Decodes an alpha-only image format by treating the data as a continuous
+    bitstream. This correctly handles the pixel order.
+    The output is a black shape with the correct transparency.
+    """
+    w, h = img.width, img.height
+    if not (w and h):
+        return None
+
+    data = img.data_bytes
+    expected_bits = w * h * bits
+    expected_bytes = (expected_bits + 7) // 8
+
+    # Use the data_size from the C file header if it's more accurate
+    if img.data_size and img.data_size < expected_bytes:
+        return None
+
+    out = bytearray(w * h * 4)
+    bit_offset = 0
     oi = 0
-    consumed = 0
-    while consumed < count:
-        byte = data[di]
-        di += 1
-        for shift in range(8 - bits, -1, -bits):
-            if consumed >= count:
-                break
-            idx = (byte >> shift) & mask
-            if bits == 1:
-                a = 255 if idx else 0
-            elif bits == 2:
-                a = (idx * 85)  # 0..3 -> 0..255
-            elif bits == 4:
-                a = (idx * 17)  # 0..15 -> 0..255
-            else:  # 8
-                a = idx
-            out[oi:oi+4] = bytes((255, 255, 255, a))
-            oi += 4
-            consumed += 1
+    mask = (1 << bits) - 1
+
+    for _ in range(w * h):
+        byte_index = bit_offset // 8
+        bit_in_byte = bit_offset % 8
+        
+        # This shift calculation is for MSB-first packing, which is typical for LVGL.
+        shift = 8 - bits - bit_in_byte
+
+        try:
+            byte = data[byte_index]
+        except IndexError:
+            # Reached end of data prematurely, break out
+            break
+
+        idx = (byte >> shift) & mask
+
+        if bits == 1:
+            alpha = 255 if idx else 0
+        elif bits == 2:
+            alpha = (idx * 85)
+        elif bits == 4:
+            alpha = (idx * 17)
+        else:  # 8
+            alpha = idx
+
+        # Set R, G, B to black and set the alpha channel to the decoded alpha value
+        out[oi:oi+4] = bytes((0, 0, 0, alpha))
+        oi += 4
+        bit_offset += bits
+
     return bytes(out)
 
 
 def decode_indexed(img, bits, depth, swap16=False):
+    """
+    Decodes an indexed color image format by treating the data as a continuous
+    bitstream, accounting for per-line padding.
+    """
     w, h = img.width, img.height
     if not (w and h):
         return None
-    count = w * h
     colors = 1 << bits
     data = img.data_bytes
-    # Determine palette stride based on depth
     if depth == '32':
-        pal_stride = 4  # RGBA8888
-    else:
-        pal_stride = 3  # RGB565 (lo,hi) + A
+        pal_stride = 4
+    else: # 16
+        pal_stride = 3
     pal_bytes = colors * pal_stride
     if len(data) < pal_bytes:
         return None
     palette_raw = data[:pal_bytes]
     pixels_raw = data[pal_bytes:]
-    needed_idx_bytes = (count * bits + 7) // 8
+
+    needed_idx_bits = w * h * bits
+    needed_idx_bytes = (needed_idx_bits + 7) // 8
     if len(pixels_raw) < needed_idx_bytes:
         return None
 
-    # Build palette as RGBA8888
     palette = []
     if pal_stride == 4:
         for i in range(0, pal_bytes, 4):
-            r, g, b, a = palette_raw[i:i+4]
+            b, g, r, a = palette_raw[i:i+4]
             palette.append((r, g, b, a))
     else:
         for i in range(0, pal_bytes, 3):
@@ -256,55 +303,88 @@ def decode_indexed(img, bits, depth, swap16=False):
             b = (b5 * 255) // 31
             palette.append((r, g, b, a))
 
-    # Unpack indices MSB-first
-    out = bytearray(count * 4)
+    out = bytearray(w * h * 4)
     oi = 0
-    consumed = 0
-    mask = (1 << bits) - 1
-    di = 0
-    while consumed < count:
-        byte = pixels_raw[di]
-        di += 1
-        for shift in range(8 - bits, -1, -bits):
-            if consumed >= count:
+    
+    # Calculate bytes per line, accounting for padding
+    bytes_per_line = (w * bits + 7) // 8
+    
+    for y in range(h):
+        line_start_byte_index = y * bytes_per_line
+        bit_offset_in_line = 0
+        
+        for x in range(w):
+            byte_index = line_start_byte_index + (bit_offset_in_line // 8)
+            bit_in_byte = bit_offset_in_line % 8
+            
+            shift = 8 - bits - bit_in_byte
+            
+            try:
+                byte = pixels_raw[byte_index]
+            except IndexError:
+                # Reached end of data
                 break
+
             idx = (byte >> shift) & mask
-            r, g, b, a = palette[idx]
-            out[oi:oi+4] = bytes((r, g, b, a))
-            oi += 4
-            consumed += 1
+            
+            try:
+                r, g, b, a = palette[idx]
+                out[oi:oi+4] = bytes((r, g, b, a))
+                oi += 4
+                bit_offset_in_line += bits
+            except IndexError:
+                # Handle invalid palette index
+                pass
     return bytes(out)
 
 
 def rgba_bytes_to_photo(master, w, h, rgba_bytes):
-    # Build a PPM (P6) in-memory; tkinter PhotoImage supports PPM via data= and format='PPM'
-    # We must strip alpha by blending against black for preview; alternatively, pre-multiply on white.
+    """Converts raw RGBA bytes into a Tkinter PhotoImage with a checkerboard background."""
     rgb = bytearray(w * h * 3)
-    ri = 0
-    for i in range(0, len(rgba_bytes), 4):
-        r, g, b, a = rgba_bytes[i:i+4]
-        # Alpha blend over transparent background (here assume black)
-        # out = src since bg=0
-        rgb[ri:ri+3] = bytes((r, g, b))
-        ri += 3
+    CHECKER_SIZE = 8
+    C1 = (64, 64, 64)
+    C2 = (96, 96, 96)
+
+    for y in range(h):
+        for x in range(w):
+            if (x // CHECKER_SIZE) % 2 == (y // CHECKER_SIZE) % 2:
+                bg_r, bg_g, bg_b = C1
+            else:
+                bg_r, bg_g, bg_b = C2
+
+            i = (y * w + x) * 4
+            r, g, b, a = rgba_bytes[i:i+4]
+
+            alpha_f = a / 255.0
+            inv_alpha_f = 1.0 - alpha_f
+            out_r = int(r * alpha_f + bg_r * inv_alpha_f)
+            out_g = int(g * alpha_f + bg_g * inv_alpha_f)
+            out_b = int(b * alpha_f + bg_b * inv_alpha_f)
+
+            ri = (y * w + x) * 3
+            rgb[ri:ri+3] = bytes((out_r, out_g, out_b))
+
     header = f"P6\n{w} {h}\n255\n".encode('ascii')
     ppm = header + bytes(rgb)
     return tk.PhotoImage(data=ppm, format='PPM')
 
 
 class ViewerApp:
+    """The main application for the LVGL Image Viewer."""
     def __init__(self, master):
         self.master = master
         master.title('LVGL Image Viewer')
         self.state_path = os.path.join(os.path.dirname(__file__), '.viewer_state.json')
         self.last_dir = os.getcwd()
+        self.lvgl_version = 'v8/v9'  # Default value
+        self.depth = '16'
+        self.swap = False
+        self.chroma_key = '0xF81F' # Default chroma key is magenta
         self._load_state()
 
-        # Controls frame
         ctrl = tk.Frame(master)
         ctrl.pack(side=tk.TOP, fill=tk.X, padx=8, pady=8)
 
-        # Row 1: Path + Open/Reload
         row1 = tk.Frame(ctrl)
         row1.pack(side=tk.TOP, fill=tk.X)
         self.path_var = tk.StringVar()
@@ -312,7 +392,6 @@ class ViewerApp:
         tk.Button(row1, text='Open .c', command=self.on_open).pack(side=tk.LEFT, padx=(0, 6))
         tk.Button(row1, text='Reload', command=self.on_reload).pack(side=tk.LEFT)
 
-        # Row 2: Options + Actions
         row2 = tk.Frame(ctrl)
         row2.pack(side=tk.TOP, fill=tk.X, pady=(6, 0))
 
@@ -321,14 +400,26 @@ class ViewerApp:
         fmt_menu = tk.OptionMenu(row2, self.cf_override, 'AUTO', *LV_IMG_CF_MAP.keys())
         fmt_menu.config(width=24)
         fmt_menu.pack(side=tk.LEFT)
+        
+        # New input for chroma key value
+        tk.Label(row2, text='Chroma Key (hex)').pack(side=tk.LEFT, padx=(12, 4))
+        self.chroma_key_var = tk.StringVar(value=self.chroma_key)
+        tk.Entry(row2, textvariable=self.chroma_key_var, width=8).pack(side=tk.LEFT)
 
-        self.depth_var = tk.StringVar(value='16')
+
+        self.lvgl_version_var = tk.StringVar(value=self.lvgl_version)
+        tk.Label(row2, text='LVGL ver').pack(side=tk.LEFT, padx=(12, 4))
+        ver_menu = tk.OptionMenu(row2, self.lvgl_version_var, 'v7', 'v8/v9')
+        ver_menu.config(width=6)
+        ver_menu.pack(side=tk.LEFT)
+
+        self.depth_var = tk.StringVar(value=self.depth)
         tk.Label(row2, text='LV_COLOR_DEPTH').pack(side=tk.LEFT, padx=(12, 4))
         depth_menu = tk.OptionMenu(row2, self.depth_var, '16', '32')
         depth_menu.config(width=4)
         depth_menu.pack(side=tk.LEFT)
 
-        self.swap_var = tk.BooleanVar(value=False)
+        self.swap_var = tk.BooleanVar(value=self.swap)
         tk.Checkbutton(row2, text='LV_COLOR_16_SWAP', variable=self.swap_var).pack(side=tk.LEFT, padx=(12, 0))
 
         actions = tk.Frame(row2)
@@ -336,7 +427,6 @@ class ViewerApp:
         tk.Button(actions, text='Render', command=self.on_render).pack(side=tk.LEFT, padx=(0, 6))
         tk.Button(actions, text='Compare', command=self.on_compare).pack(side=tk.LEFT)
 
-        # Info + Canvas
         info = tk.Frame(master)
         info.pack(side=tk.TOP, fill=tk.X, padx=8, pady=(0, 8))
         self.info_var = tk.StringVar(value='No file loaded')
@@ -365,9 +455,9 @@ class ViewerApp:
             img = parse_lvgl_c_file(path)
             self.loaded = img
             self.info_var.set(self.format_info(img))
-            # remember containing directory
             self.last_dir = os.path.dirname(path) or self.last_dir
             self._save_state()
+            self.on_render() # Auto-render on open
         except Exception as e:
             messagebox.showerror('Error', f'Failed to parse file:\n{e}')
 
@@ -383,27 +473,37 @@ class ViewerApp:
 
         depth = self.depth_var.get()
         swap = bool(self.swap_var.get())
+        lvgl_version = self.lvgl_version_var.get()
+
+        try:
+            chroma_key_val = int(self.chroma_key_var.get(), 16)
+        except (ValueError, IndexError):
+            chroma_key_val = 0xF81F # Default to magenta if parsing fails
+            messagebox.showwarning('Invalid Chroma Key', 'Invalid chroma key hex value. Defaulting to 0xF81F (magenta).')
+
+        self.chroma_key = self.chroma_key_var.get()
+        self._save_state()
 
         rgba = None
         try:
             if cf_name == 'LV_IMG_CF_TRUE_COLOR_ALPHA':
-                if depth == '16':
-                    rgba = decode_true_color_alpha_rgb565a(img, swap16=swap)
-                else:
-                    rgba = decode_true_color_alpha_rgba8888(img)
+                if lvgl_version == 'v7':
+                    rgba = decode_true_color_alpha_v7_bgra(img)
+                else:  # v8/v9
+                    rgba = decode_true_color_alpha_v8_rgba(img)
             elif cf_name == 'LV_IMG_CF_TRUE_COLOR':
                 if depth == '16':
                     rgba = decode_true_color_rgb565(img, swap16=swap)
                 else:
                     rgba = decode_true_color_rgba8888(img)
-            elif cf_name == 'LV_IMG_CF_ALPHA_1BIT':
-                rgba = decode_alpha_only(img, 1)
-            elif cf_name == 'LV_IMG_CF_ALPHA_2BIT':
-                rgba = decode_alpha_only(img, 2)
-            elif cf_name == 'LV_IMG_CF_ALPHA_4BIT':
-                rgba = decode_alpha_only(img, 4)
-            elif cf_name == 'LV_IMG_CF_ALPHA_8BIT':
-                rgba = decode_alpha_only(img, 8)
+            elif cf_name == 'LV_IMG_CF_TRUE_COLOR_CHROMA_KEYED':
+                if depth == '16':
+                    rgba = decode_true_color_chroma_keyed_rgb565(img, chroma_key_val, swap16=swap)
+                else:
+                    rgba = decode_true_color_rgba8888(img)
+            elif cf_name in ('LV_IMG_CF_ALPHA_1BIT', 'LV_IMG_CF_ALPHA_2BIT', 'LV_IMG_CF_ALPHA_4BIT', 'LV_IMG_CF_ALPHA_8BIT'):
+                bits = int(re.search(r'(\d+)BIT', cf_name).group(1))
+                rgba = decode_alpha_to_grayscale(img, bits)
             elif cf_name == 'LV_IMG_CF_INDEXED_1BIT':
                 rgba = decode_indexed(img, 1, depth, swap16=swap)
             elif cf_name == 'LV_IMG_CF_INDEXED_2BIT':
@@ -412,13 +512,23 @@ class ViewerApp:
                 rgba = decode_indexed(img, 4, depth, swap16=swap)
             elif cf_name == 'LV_IMG_CF_INDEXED_8BIT':
                 rgba = decode_indexed(img, 8, depth, swap16=swap)
+            else:
+                rgba = None
         except Exception as e:
             messagebox.showerror('Error', f'Decode failed:\n{e}')
             return
 
         if rgba is None:
             messagebox.showwarning('Warning', 'Unsupported format or decode failed (showing nothing).')
+            self.current_img = None
+            self.current_rgba = None
+            self.canvas.delete('all')
             return
+
+        # Check for all-transparent image and warn the user
+        if all(rgba[i+3] == 0 for i in range(0, len(rgba), 4)):
+             messagebox.showinfo('Possible issue detected', 'The decoded image is completely transparent. This often means the wrong color format was selected, or the original image was encoded with a transparent alpha channel.')
+
 
         self.current_rgba = rgba
         ph = rgba_bytes_to_photo(self.master, img.width, img.height, rgba)
@@ -440,38 +550,56 @@ class ViewerApp:
         img = self.loaded
         depth = self.depth_var.get()
         swap = bool(self.swap_var.get())
+        lvgl_version = self.lvgl_version_var.get()
+        try:
+            chroma_key_val = int(self.chroma_key_var.get(), 16)
+        except (ValueError, IndexError):
+            chroma_key_val = 0xF81F # Default to magenta if parsing fails
 
         candidates = [
             'LV_IMG_CF_TRUE_COLOR_ALPHA',
             'LV_IMG_CF_TRUE_COLOR',
-            'LV_IMG_CF_ALPHA_8BIT',
+            'LV_IMG_CF_TRUE_COLOR_CHROMA_KEYED',
             'LV_IMG_CF_ALPHA_1BIT',
-            'LV_IMG_CF_INDEXED_8BIT',
+            'LV_IMG_CF_ALPHA_2BIT',
+            'LV_IMG_CF_ALPHA_4BIT',
+            'LV_IMG_CF_ALPHA_8BIT',
+            'LV_IMG_CF_INDEXED_1BIT',
+            'LV_IMG_CF_INDEXED_2BIT',
             'LV_IMG_CF_INDEXED_4BIT',
+            'LV_IMG_CF_INDEXED_8BIT',
         ]
 
         win = tk.Toplevel(self.master)
         win.title('Compare Formats')
-        grid = tk.Frame(win)
+        grid = tk.Frame(win, bg="#202020")
         grid.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
 
-        photos = []  # keep refs
+        photos = []
         row = 0
         col = 0
         for name in candidates:
             try:
                 if name == 'LV_IMG_CF_TRUE_COLOR_ALPHA':
-                    rgba = decode_true_color_alpha_rgb565a(img, swap16=swap) if depth == '16' else decode_true_color_alpha_rgba8888(img)
+                    if lvgl_version == 'v7':
+                        rgba = decode_true_color_alpha_v7_bgra(img)
+                    else:  # v8/v9
+                        rgba = decode_true_color_alpha_v8_rgba(img)
                 elif name == 'LV_IMG_CF_TRUE_COLOR':
                     rgba = decode_true_color_rgb565(img, swap16=swap) if depth == '16' else decode_true_color_rgba8888(img)
-                elif name == 'LV_IMG_CF_ALPHA_1BIT':
-                    rgba = decode_alpha_only(img, 1)
-                elif name == 'LV_IMG_CF_ALPHA_8BIT':
-                    rgba = decode_alpha_only(img, 8)
-                elif name == 'LV_IMG_CF_INDEXED_8BIT':
-                    rgba = decode_indexed(img, 8, depth, swap16=swap)
+                elif name == 'LV_IMG_CF_TRUE_COLOR_CHROMA_KEYED':
+                    rgba = decode_true_color_chroma_keyed_rgb565(img, chroma_key_val, swap16=swap) if depth == '16' else decode_true_color_rgba8888(img)
+                elif name in ('LV_IMG_CF_ALPHA_1BIT', 'LV_IMG_CF_ALPHA_2BIT', 'LV_IMG_CF_ALPHA_4BIT', 'LV_IMG_CF_ALPHA_8BIT'):
+                    bits = int(re.search(r'(\d+)BIT', name).group(1))
+                    rgba = decode_alpha_to_grayscale(img, bits)
+                elif name == 'LV_IMG_CF_INDEXED_1BIT':
+                    rgba = decode_indexed(img, 1, depth, swap16=swap)
+                elif name == 'LV_IMG_CF_INDEXED_2BIT':
+                    rgba = decode_indexed(img, 2, depth, swap16=swap)
                 elif name == 'LV_IMG_CF_INDEXED_4BIT':
                     rgba = decode_indexed(img, 4, depth, swap16=swap)
+                elif name == 'LV_IMG_CF_INDEXED_8BIT':
+                    rgba = decode_indexed(img, 8, depth, swap16=swap)
                 else:
                     rgba = None
             except Exception:
@@ -479,7 +607,7 @@ class ViewerApp:
 
             frame = tk.Frame(grid, bd=1, relief=tk.SOLID)
             frame.grid(row=row, column=col, padx=6, pady=6, sticky='nsew')
-            tk.Label(frame, text=name, anchor='w').pack(fill=tk.X)
+            tk.Label(frame, text=name, anchor='w', fg="white", bg="#202020").pack(fill=tk.X)
             canvas = tk.Canvas(frame, width=max(160, img.width), height=max(120, img.height), bg='#202020', highlightthickness=0)
             canvas.pack()
 
@@ -494,7 +622,6 @@ class ViewerApp:
             if col >= 3:
                 col = 0
                 row += 1
-        # Keep photos alive on window
         win._photos = photos
 
     def _on_resize(self, event):
@@ -507,14 +634,23 @@ class ViewerApp:
         try:
             with open(self.state_path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
-            if isinstance(data, dict) and 'last_dir' in data:
-                self.last_dir = data['last_dir']
+            if isinstance(data, dict):
+                if 'last_dir' in data:
+                    self.last_dir = data['last_dir']
+                if 'lvgl_version' in data and data['lvgl_version'] in ('v7', 'v8/v9'):
+                    self.lvgl_version = data['lvgl_version']
+                if 'depth' in data:
+                    self.depth = data['depth']
+                if 'swap' in data:
+                    self.swap = data['swap']
+                if 'chroma_key' in data:
+                    self.chroma_key = data['chroma_key']
         except Exception:
             pass
 
     def _save_state(self):
         try:
-            data = {'last_dir': self.last_dir}
+            data = {'last_dir': self.last_dir, 'lvgl_version': self.lvgl_version_var.get(), 'depth': self.depth_var.get(), 'swap': self.swap_var.get(), 'chroma_key': self.chroma_key_var.get()}
             with open(self.state_path, 'w', encoding='utf-8') as f:
                 json.dump(data, f)
         except Exception:
@@ -547,5 +683,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
-
