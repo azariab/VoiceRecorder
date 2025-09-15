@@ -1,4 +1,7 @@
-** Viewer Tool **
+# Generator Tool #
+python3 /home/ab/Coding/ESP32-S3-BOX/VoiceRecorder/tools/lvgl_icon_generator/generator_simple.py
+
+# Viewer Tool #
 
 To view the LVGL graphics before flashing I built this viewer tool. 
 To run use the command:

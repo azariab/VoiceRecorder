@@ -15,21 +15,28 @@ import argparse
 import sys
 import os
 
-def parse_hex_data(data_str):
+def parse_hex_data(data_str, format_type='RGBA'):
     """Parse hex data string into RGBA tuples"""
     # Clean up the input
     data_str = data_str.replace(',', ' ').replace('0x', '').replace(' ', ' ')
     hex_values = [h for h in data_str.split() if h]
     
-    if len(hex_values) % 4 != 0:
-        raise ValueError(f"Pixel data must be in RGBA format (4 bytes per pixel), got {len(hex_values)} values")
+    bytes_per_pixel = 4 if format_type == 'RGBA' else 3
+    
+    if len(hex_values) % bytes_per_pixel != 0:
+        raise ValueError(f"Pixel data must be in {format_type} format ({bytes_per_pixel} bytes per pixel), got {len(hex_values)} values")
     
     pixel_data = []
-    for i in range(0, len(hex_values), 4):
+    for i in range(0, len(hex_values), bytes_per_pixel):
         r = int(hex_values[i], 16)
         g = int(hex_values[i+1], 16)
         b = int(hex_values[i+2], 16)
-        a = int(hex_values[i+3], 16)
+        
+        if format_type == 'RGBA':
+            a = int(hex_values[i+3], 16)
+        else:  # RGB
+            a = 0xFF  # Full alpha
+        
         pixel_data.append((r, g, b, a))
     
     return pixel_data
@@ -197,8 +204,9 @@ def main():
     parser.add_argument('--name', help='Icon name (e.g., icon_microphone)')
     parser.add_argument('--width', type=int, default=76, help='Icon width (default: 76)')
     parser.add_argument('--height', type=int, default=76, help='Icon height (default: 76)')
-    parser.add_argument('--data', help='Hex pixel data as comma-separated values (RGBA format)')
+    parser.add_argument('--data', help='Hex pixel data as comma-separated values (RGB or RGBA format)')
     parser.add_argument('--file', help='File containing hex pixel data')
+    parser.add_argument('--format', choices=['RGB', 'RGBA'], default='RGBA', help='Pixel format (default: RGBA)')
     parser.add_argument('--output', help='Output C file (default: {name}.c)')
     parser.add_argument('--example', action='store_true', help='Generate example red square icon')
     
@@ -214,11 +222,11 @@ def main():
         else:
             # Parse pixel data
             if args.data:
-                data = parse_hex_data(args.data)
+                data = parse_hex_data(args.data, args.format)
             elif args.file:
                 with open(args.file, 'r') as f:
                     data_str = f.read().strip()
-                data = parse_hex_data(data_str)
+                data = parse_hex_data(data_str, args.format)
             else:
                 print("Error: Must provide --data, --file, or --example")
                 return 1

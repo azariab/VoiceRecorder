@@ -29,7 +29,7 @@ class LVGLIconGenerator:
     def __init__(self, root):
         self.root = root
         self.root.title("LVGL Icon Generator")
-        self.root.geometry("800x600")
+        self.root.geometry("800x700")
         
         # Variables
         self.input_data = None
@@ -37,6 +37,12 @@ class LVGLIconGenerator:
         self.image_width = tk.IntVar(value=76)
         self.image_height = tk.IntVar(value=76)
         self.preview_image = None
+        self.last_path = os.getcwd()
+        self.f_a8r3g3b2 = tk.BooleanVar(value=True)
+        self.f_a8r5g6b5 = tk.BooleanVar(value=True)
+        self.f_r8g8b8a8 = tk.BooleanVar(value=True)
+        self.use_chroma_key = tk.BooleanVar(value=False)
+        self.chroma_key_value = tk.StringVar(value="0x00")
         
         self.setup_ui()
         
@@ -50,20 +56,40 @@ class LVGLIconGenerator:
         self.root.rowconfigure(0, weight=1)
         main_frame.columnconfigure(1, weight=1)
         
+        # Options Frame
+        options_frame = ttk.Frame(main_frame, padding="5")
+        options_frame.grid(row=0, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10)
+
         # Icon name
-        ttk.Label(main_frame, text="Icon Name:").grid(row=0, column=0, sticky=tk.W, pady=5)
-        ttk.Entry(main_frame, textvariable=self.icon_name, width=30).grid(row=0, column=1, sticky=(tk.W, tk.E), pady=5)
+        ttk.Label(options_frame, text="Icon Name:").grid(row=0, column=0, sticky=tk.W, pady=5)
+        ttk.Entry(options_frame, textvariable=self.icon_name, width=30).grid(row=0, column=1, sticky=(tk.W, tk.E), pady=5)
         
         # Image dimensions
-        ttk.Label(main_frame, text="Width:").grid(row=1, column=0, sticky=tk.W, pady=5)
-        ttk.Spinbox(main_frame, from_=1, to=512, textvariable=self.image_width, width=10).grid(row=1, column=1, sticky=tk.W, pady=5)
+        ttk.Label(options_frame, text="Width:").grid(row=1, column=0, sticky=tk.W, pady=5)
+        ttk.Spinbox(options_frame, from_=1, to=512, textvariable=self.image_width, width=10).grid(row=1, column=1, sticky=tk.W, pady=5)
         
-        ttk.Label(main_frame, text="Height:").grid(row=2, column=0, sticky=tk.W, pady=5)
-        ttk.Spinbox(main_frame, from_=1, to=512, textvariable=self.image_height, width=10).grid(row=2, column=1, sticky=tk.W, pady=5)
+        ttk.Label(options_frame, text="Height:").grid(row=2, column=0, sticky=tk.W, pady=5)
+        ttk.Spinbox(options_frame, from_=1, to=512, textvariable=self.image_height, width=10).grid(row=2, column=1, sticky=tk.W, pady=5)
         
+        # Color format checkboxes
+        formats_frame = ttk.LabelFrame(options_frame, text="Formats to include", padding="5")
+        formats_frame.grid(row=3, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10)
+        ttk.Checkbutton(formats_frame, text="(LV_COLOR_DEPTH 1/8) A8R3G3B2 - Alpha 8 bit, Red: 3 bit, Green: 3 bit, Blue: 2 bit", variable=self.f_a8r3g3b2).grid(row=0, column=0, sticky=tk.W)
+        ttk.Checkbutton(formats_frame, text="(LV_COLOR_DEPTH 16) A8R5G6B5 - Alpha 8 bit, Red: 5 bit, Green: 6 bit, Blue: 5 bit", variable=self.f_a8r5g6b5).grid(row=1, column=0, sticky=tk.W)
+        ttk.Checkbutton(formats_frame, text="(LV_COLOR_DEPTH 32) R8G8B8A8 - Red: 8 bit, Green: 8 bit, Blue: 8 bit, Alpha: 8 bit", variable=self.f_r8g8b8a8).grid(row=2, column=0, sticky=tk.W)
+
+        # Chroma key
+        chroma_key_frame = ttk.Frame(options_frame, padding="5")
+        chroma_key_frame.grid(row=4, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10)
+        ttk.Checkbutton(chroma_key_frame, text="Use Chroma Key", variable=self.use_chroma_key).grid(row=0, column=0, sticky=tk.W)
+        ttk.Entry(chroma_key_frame, textvariable=self.chroma_key_value, width=10).grid(row=0, column=1, sticky=tk.W)
+
+        # Generate button
+        ttk.Button(options_frame, text="Generate C File", command=self.generate_c_file).grid(row=5, column=0, columnspan=2, pady=20)
+
         # Input section
         input_frame = ttk.LabelFrame(main_frame, text="Input", padding="5")
-        input_frame.grid(row=3, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10)
+        input_frame.grid(row=1, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10)
         input_frame.columnconfigure(0, weight=1)
         
         # File input
@@ -77,22 +103,20 @@ class LVGLIconGenerator:
         
         # Preview
         preview_frame = ttk.LabelFrame(main_frame, text="Preview", padding="5")
-        preview_frame.grid(row=4, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10)
+        preview_frame.grid(row=2, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10)
         
         self.preview_label = ttk.Label(preview_frame, text="No preview available")
         self.preview_label.grid(row=0, column=0, pady=5)
         
-        # Generate button
-        ttk.Button(main_frame, text="Generate C File", command=self.generate_c_file).grid(row=5, column=0, columnspan=2, pady=20)
-        
         # Status
         self.status_label = ttk.Label(main_frame, text="Ready")
-        self.status_label.grid(row=6, column=0, columnspan=2, pady=5)
+        self.status_label.grid(row=3, column=0, columnspan=2, pady=5)
         
     def load_image_file(self):
         """Load image file and convert to pixel data"""
         file_path = filedialog.askopenfilename(
             title="Select Image File",
+            initialdir=self.last_path,
             filetypes=[
                 ("Image files", "*.png *.jpg *.jpeg *.bmp *.gif"),
                 ("PNG files", "*.png"),
@@ -101,6 +125,7 @@ class LVGLIconGenerator:
         )
         
         if file_path:
+            self.last_path = os.path.dirname(file_path)
             try:
                 # Load and convert image
                 img = Image.open(file_path).convert('RGBA')
@@ -177,12 +202,15 @@ class LVGLIconGenerator:
             # Get output file
             output_path = filedialog.asksaveasfilename(
                 title="Save C File",
+                initialdir=self.last_path,
                 defaultextension=".c",
-                filetypes=[("C files", "*.c"), ("All files", "*.*")]
+                filetypes=[("C files", "*.c"), ("All files", "*.* אמיתי") ]
             )
             
             if not output_path:
                 return
+            
+            self.last_path = os.path.dirname(output_path)
                 
             # Generate C file content
             c_content = self.generate_c_content()
@@ -202,7 +230,20 @@ class LVGLIconGenerator:
         icon_name = self.icon_name.get()
         width = self.image_width.get()
         height = self.image_height.get()
-        
+        use_chroma_key = self.use_chroma_key.get()
+
+        cf = "LV_IMG_CF_TRUE_COLOR_ALPHA"
+        if use_chroma_key:
+            cf = "LV_IMG_CF_TRUE_COLOR_CHROMA_KEYED"
+
+        data_size = 0
+        if self.f_a8r3g3b2.get():
+            data_size = width * height
+        if self.f_a8r5g6b5.get():
+            data_size = width * height * 3
+        if self.f_r8g8b8a8.get():
+            data_size = width * height * 4
+
         # Header
         content = f'''#ifdef LV_LVGL_H_INCLUDE_SIMPLE
 #include "lvgl.h"
@@ -226,12 +267,12 @@ const LV_ATTRIBUTE_MEM_ALIGN LV_ATTRIBUTE_IMG_{icon_name.upper()} uint8_t {icon_
         content += f'''}};
 
 const lv_img_dsc_t {icon_name} = {{
-  .header.cf = LV_IMG_CF_TRUE_COLOR_ALPHA,
+  .header.cf = {cf},
   .header.always_zero = 0,
   .header.reserved = 0,
   .header.w = {width},
   .header.h = {height},
-  .data_size = {width} * {height} * LV_IMG_PX_SIZE_ALPHA_BYTE,
+  .data_size = {data_size},
   .data = {icon_name}_map,
 }};
 '''
@@ -242,6 +283,8 @@ const lv_img_dsc_t {icon_name} = {{
         """Generate pixel data for different color depths"""
         width = self.image_width.get()
         height = self.image_height.get()
+        use_chroma_key = self.use_chroma_key.get()
+        chroma_key_value = int(self.chroma_key_value.get(), 16)
         
         # Ensure we have enough pixel data
         pixel_count = width * height
@@ -253,92 +296,66 @@ const lv_img_dsc_t {icon_name} = {{
             self.input_data = self.input_data[:pixel_count]
             
         content = ""
-        
-        # LV_COLOR_DEPTH == 1 || LV_COLOR_DEPTH == 8
-        content += "#if LV_COLOR_DEPTH == 1 || LV_COLOR_DEPTH == 8\n"
-        content += "  /*Pixel format: Alpha 8 bit, Red: 3 bit, Green: 3 bit, Blue: 2 bit*/\n"
-        
-        # Generate 8-bit indexed data
-        data_8bit = []
-        for r, g, b, a in self.input_data:
-            if a < 128:  # Transparent
-                data_8bit.append(0x00)
-            else:
-                # Convert to 8-bit: A8R3G3B2
+
+        if self.f_a8r3g3b2.get():
+            content += "#if LV_COLOR_DEPTH == 1 || LV_COLOR_DEPTH == 8\n"
+            content += "  /*Pixel format: Alpha 8 bit, Red: 3 bit, Green: 3 bit, Blue: 2 bit*/\n"
+            data = []
+            for r, g, b, a in self.input_data:
                 r3 = (r >> 5) & 0x7
                 g3 = (g >> 5) & 0x7
                 b2 = (b >> 6) & 0x3
-                a8 = 0xFF if a >= 128 else 0x00
-                data_8bit.append(a8)
-                
-        content += self.format_byte_array(data_8bit)
-        content += "\n#endif\n\n"
-        
-        # LV_COLOR_DEPTH == 16
-        content += "#if LV_COLOR_DEPTH == 16\n"
-        content += "  /*Pixel format: Alpha 8 bit, Red: 5 bit, Green: 6 bit, Blue: 5 bit*/\n"
-        
-        # Generate 16-bit RGB565 + Alpha data
-        data_16bit = []
-        for r, g, b, a in self.input_data:
-            if a < 8:  # Mostly transparent
-                data_16bit.extend([0x00, 0x00, 0x00])  # RGB565 + Alpha
-            else:
-                # Convert to RGB565
+                val = (a & 0xE0) | (r3 << 2) | (g3 << 5) | b2
+                if use_chroma_key and val == chroma_key_value:
+                    data.append(0x00)
+                else:
+                    data.append(val)
+            content += self.format_byte_array(data, width)
+            content += "\n#endif\n\n"
+
+        if self.f_a8r5g6b5.get():
+            content += "#if LV_COLOR_DEPTH == 16\n"
+            content += "  /*Pixel format: Alpha 8 bit, Red: 5 bit, Green: 6 bit, Blue: 5 bit*/\n"
+            data = []
+            for r, g, b, a in self.input_data:
                 r5 = (r >> 3) & 0x1F
                 g6 = (g >> 2) & 0x3F
                 b5 = (b >> 3) & 0x1F
                 rgb565 = (r5 << 11) | (g6 << 5) | b5
-                
-                # Little endian
-                data_16bit.append(rgb565 & 0xFF)
-                data_16bit.append((rgb565 >> 8) & 0xFF)
-                data_16bit.append(a)
-                
-        content += self.format_byte_array(data_16bit)
-        content += "\n#endif\n\n"
-        
-        # LV_COLOR_DEPTH == 24
-        content += "#if LV_COLOR_DEPTH == 24\n"
-        content += "  /*Pixel format: Red: 8 bit, Green: 8 bit, Blue: 8 bit*/\n"
-        
-        # Generate 24-bit RGB data
-        data_24bit = []
-        for r, g, b, a in self.input_data:
-            if a < 128:  # Transparent
-                data_24bit.extend([0x00, 0x00, 0x00])
-            else:
-                data_24bit.extend([r, g, b])
-                
-        content += self.format_byte_array(data_24bit)
-        content += "\n#endif\n\n"
-        
-        # LV_COLOR_DEPTH == 32
-        content += "#if LV_COLOR_DEPTH == 32\n"
-        content += "  /*Pixel format: Red: 8 bit, Green: 8 bit, Blue: 8 bit, Alpha: 8 bit*/\n"
-        
-        # Generate 32-bit RGBA data
-        data_32bit = []
-        for r, g, b, a in self.input_data:
-            data_32bit.extend([r, g, b, a])
-            
-        content += self.format_byte_array(data_32bit)
-        content += "\n#endif\n"
+                if use_chroma_key and rgb565 == chroma_key_value:
+                    data.extend([0x00, 0x00, 0x00])
+                else:
+                    data.append(rgb565 & 0xFF)
+                    data.append((rgb565 >> 8) & 0xFF)
+                    data.append(a)
+            content += self.format_byte_array(data, width * 3)
+            content += "\n#endif\n\n"
+
+        if self.f_r8g8b8a8.get():
+            content += "#if LV_COLOR_DEPTH == 32\n"
+            content += "  /*Pixel format: Red: 8 bit, Green: 8 bit, Blue: 8 bit, Alpha: 8 bit*/\n"
+            data = []
+            for r, g, b, a in self.input_data:
+                val = (r << 24) | (g << 16) | (b << 8) | a
+                if use_chroma_key and val == chroma_key_value:
+                    data.extend([0x00, 0x00, 0x00, 0x00])
+                else:
+                    data.extend([r, g, b, a])
+            content += self.format_byte_array(data, width * 4)
+            content += "\n#endif\n\n"
         
         return content
         
-    def format_byte_array(self, data):
+    def format_byte_array(self, data, width):
         """Format byte array as C code"""
         lines = []
-        for i in range(0, len(data), 24):  # 24 bytes per line
+        for i in range(0, len(data), width):
             line = "  "
-            for j in range(i, min(i + 24, len(data))):
-                line += f"0x{data[j]:02x}"
-                if j < min(i + 24, len(data)) - 1:
-                    line += ", "
-            line += ","
+            chunk = data[i:i + width]
+            line += ", ".join([f"0x{byte:02x}" for byte in chunk])
+            if i + width < len(data):
+                line += ","
             lines.append(line)
-            
         return "\n".join(lines)
 
 def main():
