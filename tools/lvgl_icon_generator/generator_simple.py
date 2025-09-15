@@ -56,17 +56,35 @@ class SimpleLVGLIconGenerator:
         input_frame.columnconfigure(0, weight=1)
         
         # Instructions
-        ttk.Label(input_frame, text="Paste hex pixel data (RGBA format):").grid(row=0, column=0, sticky=tk.W, pady=5)
+        ttk.Label(input_frame, text="Paste hex pixel data:").grid(row=0, column=0, sticky=tk.W, pady=5)
+        
+        # Format selection
+        format_frame = ttk.Frame(input_frame)
+        format_frame.grid(row=1, column=0, sticky=(tk.W, tk.E), pady=5)
+        
+        ttk.Label(format_frame, text="Input Format:").grid(row=0, column=0, sticky=tk.W, padx=(0, 10))
+        self.input_format = tk.StringVar(value="RGBA_8888")
+        
+        # Create format options
+        format_options = [
+            ("RGBA 8-bit (R8G8B8A8)", "RGBA_8888"),
+            ("RGB 8-bit (R8G8B8)", "RGB_888"),
+            ("RGB565 + Alpha (R5G6B5A8)", "RGB565_ALPHA"),
+            ("RGB565 Swapped + Alpha (B5G6R5A8)", "RGB565_SWAP_ALPHA"),
+        ]
+        
+        for i, (label, value) in enumerate(format_options):
+            ttk.Radiobutton(format_frame, text=label, variable=self.input_format, value=value).grid(row=0, column=i+1, sticky=tk.W, padx=(0, 10))
         
         # Raw data input
         self.raw_data_text = scrolledtext.ScrolledText(input_frame, height=8, width=60)
-        self.raw_data_text.grid(row=1, column=0, sticky=(tk.W, tk.E), pady=5)
+        self.raw_data_text.grid(row=2, column=0, sticky=(tk.W, tk.E), pady=5)
         
         # Example data button
-        ttk.Button(input_frame, text="Load Example Data", command=self.load_example_data).grid(row=2, column=0, pady=5)
+        ttk.Button(input_frame, text="Load Example Data", command=self.load_example_data).grid(row=3, column=0, pady=5)
         
         # Parse button
-        ttk.Button(input_frame, text="Parse Pixel Data", command=self.parse_raw_data).grid(row=3, column=0, pady=5)
+        ttk.Button(input_frame, text="Parse Pixel Data", command=self.parse_raw_data).grid(row=4, column=0, pady=5)
         
         # Status
         self.status_label = ttk.Label(main_frame, text="Ready - Enter pixel data in hex format (e.g., 0xff, 0x00, 0x00, 0xff)")
@@ -112,15 +130,16 @@ class SimpleLVGLIconGenerator:
             hex_data = text.replace(',', ' ').replace('0x', '').split()
             pixel_data = [int(h, 16) for h in hex_data if h]
             
-            if len(pixel_data) % 4 != 0:
-                messagebox.showerror("Error", "Pixel data must be in RGBA format (4 bytes per pixel)")
+            # Determine format and bytes per pixel
+            input_format = self.input_format.get()
+            bytes_per_pixel = self.get_bytes_per_pixel(input_format)
+            
+            if len(pixel_data) % bytes_per_pixel != 0:
+                messagebox.showerror("Error", f"Pixel data must be in {input_format} format ({bytes_per_pixel} bytes per pixel)")
                 return
                 
-            # Convert to RGBA tuples
-            self.input_data = []
-            for i in range(0, len(pixel_data), 4):
-                if i + 3 < len(pixel_data):
-                    self.input_data.append((pixel_data[i], pixel_data[i+1], pixel_data[i+2], pixel_data[i+3]))
+            # Convert to RGBA tuples based on input format
+            self.input_data = self.convert_to_rgba(pixel_data, input_format)
             
             # Check size
             width = self.image_width.get()
@@ -130,10 +149,63 @@ class SimpleLVGLIconGenerator:
             if len(self.input_data) != expected_size:
                 messagebox.showwarning("Warning", f"Expected {expected_size} pixels, got {len(self.input_data)}")
                 
-            self.status_label.config(text=f"Parsed {len(self.input_data)} pixels successfully")
+            self.status_label.config(text=f"Parsed {len(self.input_data)} pixels successfully ({input_format} format)")
                 
         except Exception as e:
             messagebox.showerror("Error", f"Failed to parse raw data: {str(e)}")
+            
+    def get_bytes_per_pixel(self, format_type):
+        """Get bytes per pixel for given format"""
+        if format_type == "RGBA_8888":
+            return 4
+        elif format_type == "RGB_888":
+            return 3
+        elif format_type in ["RGB565_ALPHA", "RGB565_SWAP_ALPHA"]:
+            return 3  # 2 bytes RGB565 + 1 byte alpha
+        else:
+            return 4
+            
+    def convert_to_rgba(self, pixel_data, format_type):
+        """Convert pixel data to RGBA tuples based on input format"""
+        rgba_data = []
+        
+        if format_type == "RGBA_8888":
+            # R8G8B8A8
+            for i in range(0, len(pixel_data), 4):
+                rgba_data.append((pixel_data[i], pixel_data[i+1], pixel_data[i+2], pixel_data[i+3]))
+                
+        elif format_type == "RGB_888":
+            # R8G8B8 (add full alpha)
+            for i in range(0, len(pixel_data), 3):
+                rgba_data.append((pixel_data[i], pixel_data[i+1], pixel_data[i+2], 0xFF))
+                
+        elif format_type == "RGB565_ALPHA":
+            # R5G6B5A8 (little endian RGB565 + alpha)
+            for i in range(0, len(pixel_data), 3):
+                rgb565 = pixel_data[i] | (pixel_data[i+1] << 8)
+                alpha = pixel_data[i+2]
+                
+                # Extract RGB565 components
+                r = ((rgb565 >> 11) & 0x1F) << 3
+                g = ((rgb565 >> 5) & 0x3F) << 2
+                b = (rgb565 & 0x1F) << 3
+                
+                rgba_data.append((r, g, b, alpha))
+                
+        elif format_type == "RGB565_SWAP_ALPHA":
+            # B5G6R5A8 (swapped RGB565 + alpha)
+            for i in range(0, len(pixel_data), 3):
+                rgb565 = pixel_data[i] | (pixel_data[i+1] << 8)
+                alpha = pixel_data[i+2]
+                
+                # Extract swapped RGB565 components (BGR order)
+                b = ((rgb565 >> 11) & 0x1F) << 3
+                g = ((rgb565 >> 5) & 0x3F) << 2
+                r = (rgb565 & 0x1F) << 3
+                
+                rgba_data.append((r, g, b, alpha))
+                
+        return rgba_data
             
     def generate_c_file(self):
         """Generate complete C file with all color depth variants"""
@@ -226,7 +298,7 @@ const lv_img_dsc_t {icon_name} = {{
         content += "#if LV_COLOR_DEPTH == 1 || LV_COLOR_DEPTH == 8\n"
         content += "  /*Pixel format: Alpha 8 bit, Red: 3 bit, Green: 3 bit, Blue: 2 bit*/\n"
         
-        # Generate 8-bit indexed data
+        # Generate 8-bit indexed data (A8R3G3B2 format)
         data_8bit = []
         for r, g, b, a in self.input_data:
             if a < 128:  # Transparent
@@ -242,11 +314,11 @@ const lv_img_dsc_t {icon_name} = {{
         content += self.format_byte_array(data_8bit)
         content += "\n#endif\n\n"
         
-        # LV_COLOR_DEPTH == 16
+        # LV_COLOR_DEPTH == 16 (RGB565 + Alpha)
         content += "#if LV_COLOR_DEPTH == 16\n"
         content += "  /*Pixel format: Alpha 8 bit, Red: 5 bit, Green: 6 bit, Blue: 5 bit*/\n"
         
-        # Generate 16-bit RGB565 + Alpha data
+        # Generate 16-bit RGB565 + Alpha data (little endian)
         data_16bit = []
         for r, g, b, a in self.input_data:
             if a < 8:  # Mostly transparent
@@ -258,12 +330,36 @@ const lv_img_dsc_t {icon_name} = {{
                 b5 = (b >> 3) & 0x1F
                 rgb565 = (r5 << 11) | (g6 << 5) | b5
                 
-                # Little endian
+                # Little endian format
                 data_16bit.append(rgb565 & 0xFF)
                 data_16bit.append((rgb565 >> 8) & 0xFF)
                 data_16bit.append(a)
                 
         content += self.format_byte_array(data_16bit)
+        content += "\n#endif\n\n"
+        
+        # LV_COLOR_DEPTH == 16 (RGB565 Swapped + Alpha) - Alternative format
+        content += "#if LV_COLOR_DEPTH == 16 && LV_COLOR_16_SWAP == 1\n"
+        content += "  /*Pixel format: Alpha 8 bit, Red: 5 bit, Green: 6 bit, Blue: 5 bit (swapped)*/\n"
+        
+        # Generate 16-bit BGR565 + Alpha data (swapped format)
+        data_16bit_swap = []
+        for r, g, b, a in self.input_data:
+            if a < 8:  # Mostly transparent
+                data_16bit_swap.extend([0x00, 0x00, 0x00])  # BGR565 + Alpha
+            else:
+                # Convert to BGR565 (swapped)
+                b5 = (b >> 3) & 0x1F
+                g6 = (g >> 2) & 0x3F
+                r5 = (r >> 3) & 0x1F
+                bgr565 = (b5 << 11) | (g6 << 5) | r5
+                
+                # Little endian format
+                data_16bit_swap.append(bgr565 & 0xFF)
+                data_16bit_swap.append((bgr565 >> 8) & 0xFF)
+                data_16bit_swap.append(a)
+                
+        content += self.format_byte_array(data_16bit_swap)
         content += "\n#endif\n\n"
         
         # LV_COLOR_DEPTH == 24
