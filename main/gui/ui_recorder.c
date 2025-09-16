@@ -275,7 +275,7 @@ static void generate_filename(char *filename, size_t max_len)
 {
     // Use a simple counter-based filename that works with FAT filesystem
     static int file_counter = 1;
-    snprintf(filename, max_len, "/sdcard/rec%03d.wav", file_counter++);
+    snprintf(filename, max_len, "/sdcard/r/rec%03d.wav", file_counter++);
     ESP_LOGI(TAG, "Generated filename: %s", filename);
 }
 
@@ -311,23 +311,27 @@ static void record_btn_event_cb(lv_event_t *e)
         ESP_LOGI(TAG, "Generated filename: %s", g_current_filename);
         
         // Create recordings directory if it doesn't exist
-        ESP_LOGI(TAG, "Creating /sdcard directory if needed");
-        int mkdir_result = mkdir("/sdcard", 0755);
-        ESP_LOGI(TAG, "mkdir result: %d", mkdir_result);
-        
-        // Check if directory exists and is accessible
-        struct stat dir_stat;
-        int stat_result = stat("/sdcard", &dir_stat);
-        ESP_LOGI(TAG, "stat /sdcard result: %d", stat_result);
-        if (stat_result == 0) {
-            ESP_LOGI(TAG, "/sdcard directory exists and is accessible");
+        ESP_LOGI(TAG, "Ensuring recordings directory /sdcard/r exists");
+        int mkdir_result = mkdir("/sdcard/r", 0755);
+        if (mkdir_result == 0) {
+            ESP_LOGI(TAG, "Created /sdcard/r");
         } else {
-            ESP_LOGE(TAG, "/sdcard directory does not exist or is not accessible");
+            ESP_LOGI(TAG, "mkdir /sdcard/r result: %d (may already exist)", mkdir_result);
+        }
+        
+        // Check if recordings directory exists and is accessible
+        struct stat dir_stat;
+        int stat_result = stat("/sdcard/r", &dir_stat);
+        ESP_LOGI(TAG, "stat /sdcard/r result: %d", stat_result);
+        if (stat_result == 0) {
+            ESP_LOGI(TAG, "/sdcard/r directory exists and is accessible");
+        } else {
+            ESP_LOGE(TAG, "/sdcard/r directory does not exist or is not accessible");
         }
         
         // List existing files to check if we're hitting the max_files limit
-        ESP_LOGI(TAG, "Listing existing files on SD card...");
-        DIR *dir = opendir("/sdcard");
+        ESP_LOGI(TAG, "Listing existing recordings...");
+        DIR *dir = opendir("/sdcard/r");
         if (dir) {
             struct dirent *entry;
             int file_count = 0;
@@ -340,61 +344,16 @@ static void record_btn_event_cb(lv_event_t *e)
                 }
             }
             closedir(dir);
-            ESP_LOGI(TAG, "Total files on SD card: %d", file_count);
+            ESP_LOGI(TAG, "Total files in /sdcard/r: %d", file_count);
             ESP_LOGI(TAG, "SD card max_files limit: 5 (from BSP configuration)");
             if (file_count >= 5) {
                 ESP_LOGE(TAG, "WARNING: SD card has %d files, max_files limit is 5!", file_count);
             }
         } else {
-            ESP_LOGE(TAG, "Failed to open /sdcard directory");
+            ESP_LOGE(TAG, "Failed to open /sdcard/r directory");
         }
         
-        // Test different filename patterns
-        ESP_LOGI(TAG, "Testing different filename patterns...");
-        
-        // Test 1: Simple filename
-        FILE *test1 = fopen("/sdcard/test.txt", "w");
-        if (test1) {
-            fputs("test", test1);
-            fclose(test1);
-            ESP_LOGI(TAG, "Test 1 (test.txt): SUCCESS");
-            remove("/sdcard/test.txt");
-        } else {
-            ESP_LOGE(TAG, "Test 1 (test.txt): FAILED - %s", strerror(errno));
-        }
-        
-        // Test 2: WAV extension
-        FILE *test2 = fopen("/sdcard/test.wav", "w");
-        if (test2) {
-            fputs("test", test2);
-            fclose(test2);
-            ESP_LOGI(TAG, "Test 2 (test.wav): SUCCESS");
-            remove("/sdcard/test.wav");
-        } else {
-            ESP_LOGE(TAG, "Test 2 (test.wav): FAILED - %s", strerror(errno));
-        }
-        
-        // Test 3: Recording prefix
-        FILE *test3 = fopen("/sdcard/recording.wav", "w");
-        if (test3) {
-            fputs("test", test3);
-            fclose(test3);
-            ESP_LOGI(TAG, "Test 3 (recording.wav): SUCCESS");
-            remove("/sdcard/recording.wav");
-        } else {
-            ESP_LOGE(TAG, "Test 3 (recording.wav): FAILED - %s", strerror(errno));
-        }
-        
-        // Test 4: Numbers in filename
-        FILE *test4 = fopen("/sdcard/rec001.wav", "w");
-        if (test4) {
-            fputs("test", test4);
-            fclose(test4);
-            ESP_LOGI(TAG, "Test 4 (rec001.wav): SUCCESS");
-            remove("/sdcard/rec001.wav");
-        } else {
-            ESP_LOGE(TAG, "Test 4 (rec001.wav): FAILED - %s", strerror(errno));
-        }
+        // (Debug write tests removed to avoid cluttering SD root)
         
         // Open file for writing
         ESP_LOGI(TAG, "Opening file for writing: %s", g_current_filename);

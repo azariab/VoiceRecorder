@@ -164,18 +164,20 @@ void app_main(void)
 
     // Initialize file iterator for recordings directory
     ESP_LOGI(TAG, "=== FILE ITERATOR INITIALIZATION ===");
-    ESP_LOGI(TAG, "Creating file iterator for directory: /sdcard");
-    file_iterator = file_iterator_new("/sdcard");
+    ESP_LOGI(TAG, "Creating file iterator for directory: /sdcard/r");
+    // Ensure recordings directory exists
+    struct stat st; if (stat("/sdcard/r", &st) != 0) { mkdir("/sdcard/r", 0755); }
+    file_iterator = file_iterator_new("/sdcard/r");
     if (file_iterator != NULL) {
         size_t count = file_iterator_get_count(file_iterator);
         ESP_LOGI(TAG, "File iterator created successfully");
-        ESP_LOGI(TAG, "Files found in /sdcard: %d", count);
+        ESP_LOGI(TAG, "Files found in /sdcard/r: %d", count);
         for (size_t i = 0; i < count; i++) {
             const char *filename = file_iterator_get_name_from_index(file_iterator, i);
             ESP_LOGI(TAG, "Startup file %d: %s", i, filename ? filename : "NULL");
         }
     } else {
-        ESP_LOGE(TAG, "Failed to create file iterator for /sdcard!");
+        ESP_LOGE(TAG, "Failed to create file iterator for /sdcard/r!");
     }
     ESP_LOGI(TAG, "=== END FILE ITERATOR INITIALIZATION ===");
     audio_player_config_t config = { .mute_fn = audio_mute_function,

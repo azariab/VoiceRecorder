@@ -187,16 +187,16 @@ void ui_media_player(void (*fn)(void))
 {
     g_player_end_cb = fn;
     
-    // Refresh file iterator to pick up new recordings
+    // Refresh file iterator to pick up new recordings (point to /sdcard/r)
     // Note: file_iterator_delete is not implemented in the component, so we just create a new one
-    file_iterator = file_iterator_new("/sdcard");
-    ESP_LOGI(TAG, "Refreshed file iterator, found %d files", file_iterator ? file_iterator_get_count(file_iterator) : 0);
+    file_iterator = file_iterator_new("/sdcard/r");
+    ESP_LOGI(TAG, "Refreshed file iterator (/sdcard/r), found %d files", file_iterator ? file_iterator_get_count(file_iterator) : 0);
     
     // Debug: List all files found
     if (file_iterator) {
         size_t count = file_iterator_get_count(file_iterator);
         ESP_LOGI(TAG, "=== MEDIA PLAYER FILE LIST ===");
-        ESP_LOGI(TAG, "Directory: /sdcard");
+        ESP_LOGI(TAG, "Directory: /sdcard/r");
         ESP_LOGI(TAG, "Total files found: %d", count);
         for (size_t i = 0; i < count; i++) {
             const char *filename = file_iterator_get_name_from_index(file_iterator, i);
