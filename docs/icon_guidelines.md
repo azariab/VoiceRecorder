@@ -2,7 +2,7 @@
 
 - Generator (PNG/SVG → C array):
 ```bash
-python3 /home/ab/Coding/ESP32-S3-BOX/VoiceRecorder/tools/lvgl_icon_generator/generator_simple.py
+python3 /home/ab/Coding/ESP32-S3-BOX/VoiceRecorder/tools/lvgl_icon_generator/generator.py
 ```
 
 - Viewer (preview icons on desktop):

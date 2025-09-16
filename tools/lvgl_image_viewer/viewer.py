@@ -44,7 +44,7 @@ def parse_lvgl_c_file(path):
 
     images = {}
     
-    for dsc_match in re.finditer(r'const\s+lv_img_dsc_t\s+([a-zA-Z0-9_]+)\s*=\s*\{([\s\S]*?)\};', text):
+    for dsc_match in re.finditer(r'const\s+lv_img_dsc_t\s+([a-zA-Z0-9_]+)\s*=\s*{\s*([\s\S]*?)\s*};', text):
         img_name = dsc_match.group(1)
         dsc_body = dsc_match.group(2)
         
@@ -64,16 +64,39 @@ def parse_lvgl_c_file(path):
         if h_match:
             img.height = int(h_match.group(2))
         if ds_match:
-            ds_expr = ds_match.group(1).strip().replace('LV_IMG_PX_SIZE_ALPHA_BYTE', '1')
+            ds_expr = ds_match.group(1).strip()
+            # A basic C expression evaluator for data_size. It's a heuristic.
             try:
-                img.data_size = eval(ds_expr, {}, {'w': img.width, 'h': img.height})
+                # Substitute known macros. This is a guess, as we don't know LV_COLOR_DEPTH at parse time.
+                # We'll use 3 for TRUE_COLOR_ALPHA, which is correct for 16-bit depth.
+                if 'LV_IMG_PX_SIZE_ALPHA_BYTE' in ds_expr:
+                    if img.cf_name == 'LV_IMG_CF_TRUE_COLOR_ALPHA':
+                        # This is a common case, assume 3 bytes for 16-bit color depth
+                        ds_expr = ds_expr.replace('LV_IMG_PX_SIZE_ALPHA_BYTE', '3')
+                
+                # Substitute w and h
+                if img.width: ds_expr = ds_expr.replace('w', str(img.width))
+                if img.height: ds_expr = ds_expr.replace('h', str(img.height))
+
+                # Evaluate the simple expression (e.g., "5776 * 3")
+                if '*' in ds_expr:
+                    parts = [p.strip() for p in ds_expr.split('*')]
+                    val = 1
+                    for p in parts:
+                        if p.isdigit():
+                            val *= int(p)
+                    img.data_size = val
+                else:
+                    img.data_size = int(ds_expr)
             except:
-                img.data_size = None
+                # Fallback: just grab the first number
+                m = re.search(r'\d+', ds_expr)
+                img.data_size = int(m.group(0)) if m else None
 
         if data_name_match:
             data_name = data_name_match.group(1)
             
-            arr_re = re.compile(r'const\s+.*\s*uint8_t\s+%s\s*\[\s*\]\s*=\s*\{([\s\S]*?)\};' % re.escape(data_name))
+            arr_re = re.compile(r'const\s+.*\s*uint8_t\s+%s\s*\[\s*\]\s*=\s*{([\s\S]*?)};' % re.escape(data_name))
             m = arr_re.search(text)
             if m:
                 body = m.group(1)
@@ -91,6 +114,9 @@ def parse_lvgl_c_file(path):
                         condition = condition_and_data[0].strip()
                         data_str = condition_and_data[1].split('#endif')[0]
                         
+                        # Remove comments before parsing bytes
+                        data_str = re.sub(r'/\*.*?\*/', '', data_str, flags=re.DOTALL)
+                        
                         values = re.findall(r'0x([0-9a-fA-F]{1,2})|\b(\d{1,3})\b', data_str)
                         buf = bytearray()
                         for hx, dec in values:
@@ -103,6 +129,8 @@ def parse_lvgl_c_file(path):
                         img.pixel_maps[condition] = bytes(buf)
                 
                 if not img.pixel_maps:
+                    # Remove comments before parsing bytes
+                    body = re.sub(r'/\*.*?\*/', '', body, flags=re.DOTALL)
                     values = re.findall(r'0x([0-9a-fA-F]{1,2})|\b(\d{1,3})\b', body)
                     buf = bytearray()
                     for hx, dec in values:
@@ -414,6 +442,51 @@ def decode_true_color_alpha_v8_rgba(img, stride=0):
         for x in range(w):
             out[oi:oi+4] = data[di:di+4]
             di += 4
+            oi += 4
+    return bytes(out)
+
+
+def decode_true_color_alpha_rgb565(img, swap16=False, stride=0):
+    """Decodes a True Color with Alpha (RGB565) image."""
+    w, h = img.width, img.height
+    if not (w and h):
+        return None
+
+    bpp = 3 # Bytes per pixel (2 for color, 1 for alpha)
+    line_bytes = w * bpp
+    if stride == 0:
+        stride = line_bytes
+
+    if stride < line_bytes:
+        return None
+
+    expected = h * stride
+    data = img.data_bytes
+    if len(data) < expected:
+        return None
+    out = bytearray(w * h * 4)
+    oi = 0
+    for y in range(h):
+        di = y * stride
+        for _ in range(w):
+            b1 = data[di]
+            b2 = data[di + 1]
+            alpha = data[di + 2]
+            di += 3
+            
+            if swap16:
+                lo, hi = b2, b1
+            else:
+                lo, hi = b1, b2
+            
+            value = (hi << 8) | lo
+            r5 = (value >> 11) & 0x1F
+            g6 = (value >> 5) & 0x3F
+            b5 = value & 0x1F
+            r = (r5 * 255) // 31
+            g = (g6 * 255) // 63
+            b = (b5 * 255) // 31
+            out[oi:oi + 4] = bytes((r, g, b, alpha))
             oi += 4
     return bytes(out)
 
@@ -833,7 +906,9 @@ class ViewerApp:
         rgba = None
         try:
             if cf_name == 'LV_IMG_CF_TRUE_COLOR_ALPHA':
-                if lvgl_version == 'v7':
+                if depth == '16':
+                    rgba = decode_true_color_alpha_rgb565(img, swap16=swap, stride=stride)
+                elif lvgl_version == 'v7':
                     rgba = decode_true_color_alpha_v7_bgra(img, stride=stride)
                 else:  # v8/v9
                     rgba = decode_true_color_alpha_v8_rgba(img, stride=stride)
@@ -953,7 +1028,9 @@ class ViewerApp:
         for name in candidates:
             try:
                 if name == 'LV_IMG_CF_TRUE_COLOR_ALPHA':
-                    if lvgl_version == 'v7':
+                    if depth == '16':
+                        rgba = decode_true_color_alpha_rgb565(img, swap16=swap, stride=stride)
+                    elif lvgl_version == 'v7':
                         rgba = decode_true_color_alpha_v7_bgra(img, stride=stride)
                     else:  # v8/v9
                         rgba = decode_true_color_alpha_v8_rgba(img, stride=stride)

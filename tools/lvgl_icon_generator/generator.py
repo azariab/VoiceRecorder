@@ -29,7 +29,7 @@ class LVGLIconGenerator:
     def __init__(self, root):
         self.root = root
         self.root.title("LVGL Icon Generator")
-        self.root.geometry("800x700")
+        self.root.geometry("800x750")
         
         # Variables
         self.input_data = None
@@ -40,6 +40,7 @@ class LVGLIconGenerator:
         self.last_path = os.getcwd()
         self.f_a8r3g3b2 = tk.BooleanVar(value=True)
         self.f_a8r5g6b5 = tk.BooleanVar(value=True)
+        self.f_a8r5g6b5_swap = tk.BooleanVar(value=True)
         self.f_r8g8b8a8 = tk.BooleanVar(value=True)
         self.use_chroma_key = tk.BooleanVar(value=False)
         self.chroma_key_value = tk.StringVar(value="0x00")
@@ -76,7 +77,8 @@ class LVGLIconGenerator:
         formats_frame.grid(row=3, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10)
         ttk.Checkbutton(formats_frame, text="(LV_COLOR_DEPTH 1/8) A8R3G3B2 - Alpha 8 bit, Red: 3 bit, Green: 3 bit, Blue: 2 bit", variable=self.f_a8r3g3b2).grid(row=0, column=0, sticky=tk.W)
         ttk.Checkbutton(formats_frame, text="(LV_COLOR_DEPTH 16) A8R5G6B5 - Alpha 8 bit, Red: 5 bit, Green: 6 bit, Blue: 5 bit", variable=self.f_a8r5g6b5).grid(row=1, column=0, sticky=tk.W)
-        ttk.Checkbutton(formats_frame, text="(LV_COLOR_DEPTH 32) R8G8B8A8 - Red: 8 bit, Green: 8 bit, Blue: 8 bit, Alpha: 8 bit", variable=self.f_r8g8b8a8).grid(row=2, column=0, sticky=tk.W)
+        ttk.Checkbutton(formats_frame, text="(LV_COLOR_DEPTH 16, SWAP) A8R5G6B5 Swapped - Alpha 8 bit, Red: 5 bit, Green: 6 bit, Blue: 5 bit", variable=self.f_a8r5g6b5_swap).grid(row=2, column=0, sticky=tk.W)
+        ttk.Checkbutton(formats_frame, text="(LV_COLOR_DEPTH 32) R8G8B8A8 - Red: 8 bit, Green: 8 bit, Blue: 8 bit, Alpha: 8 bit", variable=self.f_r8g8b8a8).grid(row=3, column=0, sticky=tk.W)
 
         # Chroma key
         chroma_key_frame = ttk.Frame(options_frame, padding="5")
@@ -230,19 +232,12 @@ class LVGLIconGenerator:
         icon_name = self.icon_name.get()
         width = self.image_width.get()
         height = self.image_height.get()
-        use_chroma_key = self.use_chroma_key.get()
 
+        # Always use LV_IMG_CF_TRUE_COLOR_ALPHA for consistency with manufacturer files
+        # The actual transparency/chroma key is handled by the pixel data and render settings
         cf = "LV_IMG_CF_TRUE_COLOR_ALPHA"
-        if use_chroma_key:
-            cf = "LV_IMG_CF_TRUE_COLOR_CHROMA_KEYED"
 
-        data_size = 0
-        if self.f_a8r3g3b2.get():
-            data_size = width * height
-        if self.f_a8r5g6b5.get():
-            data_size = width * height * 3
-        if self.f_r8g8b8a8.get():
-            data_size = width * height * 4
+        data_size = f"{width} * {height} * LV_IMG_PX_SIZE_ALPHA_BYTE"
 
         # Header
         content = f'''#ifdef LV_LVGL_H_INCLUDE_SIMPLE
@@ -305,16 +300,16 @@ const lv_img_dsc_t {icon_name} = {{
                 r3 = (r >> 5) & 0x7
                 g3 = (g >> 5) & 0x7
                 b2 = (b >> 6) & 0x3
-                val = (a & 0xE0) | (r3 << 2) | (g3 << 5) | b2
-                if use_chroma_key and val == chroma_key_value:
-                    data.append(0x00)
+                color = (r3 << 5) | (g3 << 2) | b2
+                if use_chroma_key and color == chroma_key_value:
+                    data.extend([0x00, 0x00])
                 else:
-                    data.append(val)
-            content += self.format_byte_array(data, width)
+                    data.extend([color, a])
+            content += self.format_byte_array(data, width * 2)
             content += "\n#endif\n\n"
 
         if self.f_a8r5g6b5.get():
-            content += "#if LV_COLOR_DEPTH == 16\n"
+            content += "#if LV_COLOR_DEPTH == 16 && LV_COLOR_16_SWAP == 0\n"
             content += "  /*Pixel format: Alpha 8 bit, Red: 5 bit, Green: 6 bit, Blue: 5 bit*/\n"
             data = []
             for r, g, b, a in self.input_data:
@@ -327,6 +322,24 @@ const lv_img_dsc_t {icon_name} = {{
                 else:
                     data.append(rgb565 & 0xFF)
                     data.append((rgb565 >> 8) & 0xFF)
+                    data.append(a)
+            content += self.format_byte_array(data, width * 3)
+            content += "\n#endif\n\n"
+
+        if self.f_a8r5g6b5_swap.get():
+            content += "#if LV_COLOR_DEPTH == 16 && LV_COLOR_16_SWAP != 0\n"
+            content += "  /*Pixel format: Alpha 8 bit, Red: 5 bit, Green: 6 bit, Blue: 5 bit, SWAPPED*/\n"
+            data = []
+            for r, g, b, a in self.input_data:
+                r5 = (r >> 3) & 0x1F
+                g6 = (g >> 2) & 0x3F
+                b5 = (b >> 3) & 0x1F
+                rgb565 = (r5 << 11) | (g6 << 5) | b5
+                if use_chroma_key and rgb565 == chroma_key_value:
+                    data.extend([0x00, 0x00, 0x00])
+                else:
+                    data.append((rgb565 >> 8) & 0xFF)
+                    data.append(rgb565 & 0xFF)
                     data.append(a)
             content += self.format_byte_array(data, width * 3)
             content += "\n#endif\n\n"
