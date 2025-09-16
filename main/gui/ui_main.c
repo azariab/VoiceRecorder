@@ -220,13 +220,13 @@ LV_IMG_DECLARE(icon_network)
 LV_IMG_DECLARE(icon_recorder)
 
 static item_desc_t item[] = {
+    { "Voice Recorder", (void *) &icon_recorder,        ui_recorder_start, recorder_end_cb},
+    { "Media Player",   (void *) &icon_media_player,    ui_media_player, player_end_cb},
+    { "Device Control", (void *) &icon_dev_ctrl,        ui_device_ctrl_start, dev_ctrl_end_cb},
 #if CONFIG_BSP_BOARD_ESP32_S3_BOX_3
     { "Sensor Monitor", (void *) &icon_sensor_monitor,  ui_sensor_monitor_start, sensor_monitor_end_cb},
 #endif
-    { "Voice Recorder", (void *) &icon_recorder,        ui_recorder_start, recorder_end_cb},
-    { "Device Control", (void *) &icon_dev_ctrl,        ui_device_ctrl_start, dev_ctrl_end_cb},
     { "Network",        (void *) &icon_network,         ui_net_config_start, net_end_cb},
-    { "Media Player",   (void *) &icon_media_player,    ui_media_player, player_end_cb},
     { "Help",           (void *) &icon_help,            ui_help, NULL},
     { "About Us",       (void *) &icon_about_us,        ui_about_us_start, about_us_end_cb},
 };
