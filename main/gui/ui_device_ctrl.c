@@ -7,78 +7,84 @@
 #include "esp_log.h"
 #include "bsp_board.h"
 #include "lvgl.h"
-#include "app_led.h"
-#include "app_fan.h"
-#include "app_switch.h"
+#include <dirent.h>
+#include <sys/stat.h>
+#include <errno.h>
+#include <stdio.h>
 #include "ui_main.h"
 #include "ui_device_ctrl.h"
 
 static const char *TAG = "ui_dev_ctrl";
 
-LV_FONT_DECLARE(font_en_16);
-
-LV_IMG_DECLARE(icon_fan_on)
-LV_IMG_DECLARE(icon_fan_off)
-LV_IMG_DECLARE(icon_light_on)
-LV_IMG_DECLARE(icon_light_off)
-LV_IMG_DECLARE(icon_switch_on)
-LV_IMG_DECLARE(icon_switch_off)
-LV_IMG_DECLARE(icon_air_on)
-LV_IMG_DECLARE(icon_air_off)
-
-static ui_dev_type_t g_active_dev_type = UI_DEV_LIGHT;
-static lv_obj_t *g_func_btn[4] = {NULL};
 static void (*g_dev_ctrl_end_cb)(void) = NULL;
-
-typedef struct {
-    ui_dev_type_t type;
-    const char *name;
-    lv_img_dsc_t const *img_on;
-    lv_img_dsc_t const *img_off;
-} btn_img_src_t;
-
-static const btn_img_src_t img_src_list[] = {
-    { .type = UI_DEV_LIGHT, .name = "Light", .img_on = &icon_light_on, .img_off = &icon_light_off },
-    { .type = UI_DEV_SWITCH, .name = "Switch", .img_on = &icon_switch_on, .img_off = &icon_switch_off },
-    { .type = UI_DEV_FAN, .name = "Fan", .img_on = &icon_fan_on, .img_off = &icon_fan_off },
-    { .type = UI_DEV_AIR, .name = "Air", .img_on = &icon_air_on, .img_off = &icon_air_off },
-};
-
+// Legacy no-op for build compatibility
 void ui_dev_ctrl_set_state(ui_dev_type_t type, bool state)
 {
-    if (NULL == g_func_btn[type]) {
-        return;
-    }
-    ui_acquire();
-    lv_obj_t *img = (lv_obj_t *) g_func_btn[type]->user_data;
-    if (state) {
-        lv_obj_add_state(g_func_btn[type], LV_STATE_CHECKED);
-        lv_img_set_src(img, img_src_list[type].img_on);
-    } else {
-        lv_obj_clear_state(g_func_btn[type], LV_STATE_CHECKED);
-        lv_img_set_src(img, img_src_list[type].img_off);
-    }
-    ui_release();
+    (void)type;
+    (void)state;
 }
 
-static void ui_dev_ctrl_page_func_click_cb(lv_event_t *e)
-{
-    uint32_t i = (uint32_t)lv_event_get_user_data(e);
-    g_active_dev_type = i;
 
-    if (UI_DEV_LIGHT == g_active_dev_type) {
-        bool state = app_pwm_led_get_state();
-        app_pwm_led_set_power(!state);
-    } else if (UI_DEV_SWITCH == g_active_dev_type) {
-        bool state = app_switch_get_state();
-        app_switch_set_power(!state);
-    } else if (UI_DEV_FAN == g_active_dev_type) {
-        bool state = app_fan_get_state();
-        app_fan_set_power(!state);
-    } else {
-        // Other device Not be supported, just update the UI
-        ui_dev_ctrl_set_state(g_active_dev_type, !lv_obj_has_state(g_func_btn[g_active_dev_type], LV_STATE_CHECKED));
+static int delete_all_recordings(const char *dir_path)
+{
+    int deleted = 0;
+    DIR *dir = opendir(dir_path);
+    if (!dir) {
+        ESP_LOGE(TAG, "Failed to open %s: %s", dir_path, strerror(errno));
+        return -1;
     }
+    struct dirent *entry;
+    char fullpath[256];
+    while ((entry = readdir(dir)) != NULL) {
+        if (entry->d_type != DT_REG) {
+            continue;
+        }
+        snprintf(fullpath, sizeof(fullpath), "%s/%s", dir_path, entry->d_name);
+        if (remove(fullpath) == 0) {
+            deleted++;
+            ESP_LOGI(TAG, "Deleted: %s", fullpath);
+        } else {
+            ESP_LOGE(TAG, "Failed to delete %s: %s", fullpath, strerror(errno));
+        }
+    }
+    closedir(dir);
+    return deleted;
+}
+
+static void on_confirm_delete_cb(lv_event_t *e)
+{
+    lv_obj_t *mbox = lv_event_get_current_target(e);
+    const char *btn_txt = lv_msgbox_get_active_btn_text(mbox);
+    lv_obj_t *parent = (lv_obj_t *)lv_event_get_user_data(e);
+    if (btn_txt && strcmp(btn_txt, "Delete") == 0) {
+        // Ensure directory exists
+        struct stat st; if (stat("/sdcard/r", &st) != 0) { mkdir("/sdcard/r", 0755); }
+        int n = delete_all_recordings("/sdcard/r");
+        char msg[96];
+        if (n >= 0) {
+            snprintf(msg, sizeof(msg), "Deleted %d file(s) from /sdcard/r.", n);
+        } else {
+            snprintf(msg, sizeof(msg), "Failed to access /sdcard/r. See logs.");
+        }
+        lv_obj_del(mbox);
+        lv_obj_t *done = lv_msgbox_create(parent, "Done", msg, NULL, true);
+        lv_obj_center(done);
+    } else {
+        lv_obj_del(mbox);
+    }
+}
+
+static void delete_btn_event_cb(lv_event_t *e)
+{
+    lv_obj_t *parent = (lv_obj_t *)lv_event_get_user_data(e);
+    static const char *btns[] = {"Cancel", "Delete", NULL};
+    lv_obj_t *mbox = lv_msgbox_create(parent,
+                                      "Confirm",
+                                      "Delete ALL recordings in /sdcard/r?\nThis cannot be undone.",
+                                      btns,
+                                      true);
+    lv_obj_center(mbox);
+    lv_obj_add_event_cb(mbox, on_confirm_delete_cb, LV_EVENT_VALUE_CHANGED, parent);
 }
 
 static void ui_dev_ctrl_page_return_click_cb(lv_event_t *e)
@@ -91,10 +97,6 @@ static void ui_dev_ctrl_page_return_click_cb(lv_event_t *e)
     bsp_btn_rm_all_callback(BSP_BUTTON_MAIN);
 #endif
     lv_obj_del(obj);
-    g_func_btn[0] = NULL;
-    g_func_btn[1] = NULL;
-    g_func_btn[2] = NULL;
-    g_func_btn[3] = NULL;
     if (g_dev_ctrl_end_cb) {
         g_dev_ctrl_end_cb();
     }
@@ -138,46 +140,21 @@ void ui_device_ctrl_start(void (*fn)(void))
     bsp_btn_register_callback(BSP_BUTTON_MAIN, BUTTON_PRESS_UP, btn_return_down_cb, (void *)btn_return);
 #endif
 
-    for (size_t i = 0; i < 4; i++) {
-        g_func_btn[i] = lv_btn_create(page);
-        lv_obj_set_size(g_func_btn[i], 85, 85);
-        lv_obj_add_style(g_func_btn[i], &ui_button_styles()->style_focus, LV_STATE_FOCUS_KEY);
-        lv_obj_add_style(g_func_btn[i], &ui_button_styles()->style_focus, LV_STATE_FOCUSED);
-        lv_obj_set_style_bg_color(g_func_btn[i], lv_color_white(), LV_STATE_DEFAULT);
-        lv_obj_set_style_bg_color(g_func_btn[i], lv_color_white(), LV_STATE_CHECKED);
-        lv_obj_set_style_shadow_color(g_func_btn[i], lv_color_make(0, 0, 0), LV_PART_MAIN);
-        lv_obj_set_style_shadow_width(g_func_btn[i], 10, LV_PART_MAIN);
-        lv_obj_set_style_shadow_opa(g_func_btn[i], LV_OPA_40, LV_PART_MAIN);
-
-        lv_obj_set_style_border_width(g_func_btn[i], 1, LV_PART_MAIN);
-        lv_obj_set_style_border_color(g_func_btn[i], lv_palette_main(LV_PALETTE_GREY), LV_PART_MAIN);
-
-        lv_obj_set_style_radius(g_func_btn[i], 10, LV_STATE_DEFAULT);
-        lv_obj_align(g_func_btn[i], LV_ALIGN_CENTER, i % 2 ? 48 : -48, i < 2 ? -48 - 3 : 48 - 3);
-
-        lv_obj_t *img = lv_img_create(g_func_btn[i]);
-        lv_img_set_src(img, img_src_list[i].img_off);
-        lv_obj_align(img, LV_ALIGN_CENTER, 0, -10);
-        lv_obj_set_user_data(img, (void *) &img_src_list[i]);
-
-        lv_obj_t *label = lv_label_create(g_func_btn[i]);
-        lv_label_set_text_static(label, img_src_list[i].name);
-        lv_obj_set_style_text_color(label, lv_color_make(40, 40, 40), LV_STATE_DEFAULT);
-        lv_obj_set_style_text_font(label, &font_en_16, LV_STATE_DEFAULT);
-        lv_obj_align(label, LV_ALIGN_CENTER, 0, 20);
-
-        lv_obj_set_user_data(g_func_btn[i], (void *) img);
-        if (UI_DEV_LIGHT == i) {
-            ui_dev_ctrl_set_state(i, app_pwm_led_get_state());
-        } else if (UI_DEV_SWITCH == i) {
-            ui_dev_ctrl_set_state(i, app_switch_get_state());
-        } else if (UI_DEV_FAN == i) {
-            ui_dev_ctrl_set_state(i, app_fan_get_state());
-        }
-        lv_obj_add_event_cb(g_func_btn[i], ui_dev_ctrl_page_func_click_cb, LV_EVENT_CLICKED, (void *)i);
-        if (ui_get_btn_op_group()) {
-            lv_group_add_obj(ui_get_btn_op_group(), g_func_btn[i]);
-        }
+    // Single utility: delete all recordings in /sdcard/r
+    lv_obj_t *del_btn = lv_btn_create(page);
+    lv_obj_set_size(del_btn, 220, 60);
+    lv_obj_add_style(del_btn, &ui_button_styles()->style, 0);
+    lv_obj_add_style(del_btn, &ui_button_styles()->style_pr, LV_STATE_PRESSED);
+    lv_obj_set_style_radius(del_btn, 8, LV_STATE_DEFAULT);
+    lv_obj_set_style_bg_color(del_btn, lv_color_hex(0xAA3030), LV_STATE_DEFAULT);
+    lv_obj_align(del_btn, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_t *lab = lv_label_create(del_btn);
+    lv_label_set_text_static(lab, "Delete ALL recordings");
+    lv_obj_set_style_text_color(lab, lv_color_hex(0xFFFFFF), LV_STATE_DEFAULT);
+    lv_obj_center(lab);
+    lv_obj_add_event_cb(del_btn, delete_btn_event_cb, LV_EVENT_CLICKED, page);
+    if (ui_get_btn_op_group()) {
+        lv_group_add_obj(ui_get_btn_op_group(), del_btn);
     }
     if (ui_get_btn_op_group()) {
         lv_group_add_obj(ui_get_btn_op_group(), btn_return);

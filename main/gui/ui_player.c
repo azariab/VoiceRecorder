@@ -65,6 +65,11 @@ static void play_present()
     if(AUDIO_PLAYER_STATE_PAUSE == audio_player_get_state()) {
         audio_player_resume();
     } else {
+        // Check if file iterator has any files
+        if (!file_iterator || file_iterator_get_count(file_iterator) == 0) {
+            ESP_LOGW(TAG, "No files available to play");
+            return;
+        }
         file_iterator_get_full_path_from_index(file_iterator, file_iterator_get_index(file_iterator), filename, sizeof(filename));
         FILE *fp = fopen(filename, "rb");
         if (!fp) {
@@ -93,9 +98,17 @@ static void ui_player_page_pause_click_cb(lv_event_t *e)
 static void ui_player_page_prev_click_cb(lv_event_t *e)
 {
     lv_obj_t *obj = lv_event_get_user_data(e);
+    if (!file_iterator || file_iterator_get_count(file_iterator) == 0) {
+        return;
+    }
     file_iterator_prev(file_iterator);
     play_present();
-    lv_label_set_text_static(g_lab_file, file_iterator_get_name_from_index(file_iterator, file_iterator_get_index(file_iterator)));
+    const char *filename = file_iterator ? file_iterator_get_name_from_index(file_iterator, file_iterator_get_index(file_iterator)) : NULL;
+    if (filename) {
+        lv_label_set_text_static(g_lab_file, filename);
+    } else {
+        lv_label_set_text_static(g_lab_file, "No recordings found");
+    }
     lv_event_t event = {
         .user_data = obj,
     };
@@ -106,9 +119,17 @@ static void ui_player_page_prev_click_cb(lv_event_t *e)
 static void ui_player_page_next_click_cb(lv_event_t *e)
 {
     lv_obj_t *obj = lv_event_get_user_data(e);
+    if (!file_iterator || file_iterator_get_count(file_iterator) == 0) {
+        return;
+    }
     file_iterator_next(file_iterator);
     play_present();
-    lv_label_set_text_static(g_lab_file, file_iterator_get_name_from_index(file_iterator, file_iterator_get_index(file_iterator)));
+    const char *filename = file_iterator ? file_iterator_get_name_from_index(file_iterator, file_iterator_get_index(file_iterator)) : NULL;
+    if (filename) {
+        lv_label_set_text_static(g_lab_file, filename);
+    } else {
+        lv_label_set_text_static(g_lab_file, "No recordings found");
+    }
     lv_event_t event = {
         .user_data = obj,
     };
@@ -154,7 +175,12 @@ static void audio_cb(audio_player_cb_ctx_t *ctx)
     if (AUDIO_PLAYER_CALLBACK_EVENT_IDLE == ctx->audio_event) {
         g_media_is_playing = false;
         ui_acquire();
-        lv_label_set_text_static(g_lab_file, file_iterator_get_name_from_index(file_iterator, file_iterator_get_index(file_iterator)));
+        const char *filename = file_iterator ? file_iterator_get_name_from_index(file_iterator, file_iterator_get_index(file_iterator)) : NULL;
+    if (filename) {
+        lv_label_set_text_static(g_lab_file, filename);
+    } else {
+        lv_label_set_text_static(g_lab_file, "No recordings found");
+    }
         if (lab_play_pause) {
             lv_label_set_text_static(lab_play_pause, LV_SYMBOL_PLAY);
         }
@@ -165,7 +191,12 @@ static void audio_cb(audio_player_cb_ctx_t *ctx)
             (AUDIO_PLAYER_CALLBACK_EVENT_COMPLETED_PLAYING_NEXT == ctx->audio_event)) {
         g_media_is_playing = true;
         ui_acquire();
-        lv_label_set_text_static(g_lab_file, file_iterator_get_name_from_index(file_iterator, file_iterator_get_index(file_iterator)));
+        const char *filename = file_iterator ? file_iterator_get_name_from_index(file_iterator, file_iterator_get_index(file_iterator)) : NULL;
+    if (filename) {
+        lv_label_set_text_static(g_lab_file, filename);
+    } else {
+        lv_label_set_text_static(g_lab_file, "No recordings found");
+    }
         if (lab_play_pause) {
             lv_label_set_text_static(lab_play_pause, LV_SYMBOL_PAUSE);
         }
@@ -175,7 +206,12 @@ static void audio_cb(audio_player_cb_ctx_t *ctx)
     if (AUDIO_PLAYER_CALLBACK_EVENT_PAUSE == ctx->audio_event) {
         g_media_is_playing = false;
         ui_acquire();
-        lv_label_set_text_static(g_lab_file, file_iterator_get_name_from_index(file_iterator, file_iterator_get_index(file_iterator)));
+        const char *filename = file_iterator ? file_iterator_get_name_from_index(file_iterator, file_iterator_get_index(file_iterator)) : NULL;
+    if (filename) {
+        lv_label_set_text_static(g_lab_file, filename);
+    } else {
+        lv_label_set_text_static(g_lab_file, "No recordings found");
+    }
         if (lab_play_pause) {
             lv_label_set_text_static(lab_play_pause, LV_SYMBOL_PLAY);
         }
@@ -236,7 +272,13 @@ void ui_media_player(void (*fn)(void))
     lv_obj_align(img, LV_ALIGN_TOP_RIGHT, -10, 35);
 
     g_lab_file = lv_label_create(page);
-    lv_label_set_text_static(g_lab_file, file_iterator_get_name_from_index(file_iterator, file_iterator_get_index(file_iterator)));
+    // Handle case where no files exist (after deletion)
+    const char *filename = file_iterator ? file_iterator_get_name_from_index(file_iterator, file_iterator_get_index(file_iterator)) : NULL;
+    if (filename) {
+        lv_label_set_text_static(g_lab_file, filename);
+    } else {
+        lv_label_set_text_static(g_lab_file, "No recordings found");
+    }
     lv_obj_set_size(g_lab_file, 250, 32);
     lv_obj_set_style_text_font(g_lab_file, &lv_font_montserrat_24, LV_STATE_DEFAULT);
     lv_label_set_long_mode(g_lab_file, LV_LABEL_LONG_SCROLL_CIRCULAR);
