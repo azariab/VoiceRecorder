@@ -50,26 +50,32 @@ esp_err_t settings_read_parameter_from_nvs(void)
     nvs_handle_t my_handle = 0;
     esp_err_t ret = nvs_open(NAME_SPACE, NVS_READONLY, &my_handle);
     if (ESP_ERR_NVS_NOT_FOUND == ret) {
-        ESP_LOGW(TAG, "Not found, Set to default");
+        ESP_LOGW(TAG, "NVS namespace not found, setting to default");
         memcpy(&g_sys_param, &g_default_sys_param, sizeof(sys_param_t));
         settings_write_parameter_to_nvs();
         return ESP_OK;
     }
 
-    ESP_GOTO_ON_FALSE(ESP_OK == ret, ret, err, TAG, "nvs open failed (0x%x)", ret);
+    if (ESP_OK != ret) {
+        ESP_LOGE(TAG, "NVS open failed (0x%x), setting to default", ret);
+        memcpy(&g_sys_param, &g_default_sys_param, sizeof(sys_param_t));
+        settings_write_parameter_to_nvs();
+        return ESP_OK;
+    }
 
     size_t len = sizeof(sys_param_t);
     ret = nvs_get_blob(my_handle, KEY, &g_sys_param, &len);
-    ESP_GOTO_ON_FALSE(ESP_OK == ret, ret, err, TAG, "can't read param");
-    nvs_close(my_handle);
-
-    settings_check(&g_sys_param);
-    return ret;
-err:
-    if (my_handle) {
+    if (ESP_OK != ret) {
+        ESP_LOGW(TAG, "can't read param (0x%x), setting to default", ret);
         nvs_close(my_handle);
+        memcpy(&g_sys_param, &g_default_sys_param, sizeof(sys_param_t));
+        settings_write_parameter_to_nvs();
+        return ESP_OK;
     }
-    return ret;
+    
+    nvs_close(my_handle);
+    settings_check(&g_sys_param);
+    return ESP_OK;
 }
 
 esp_err_t settings_write_parameter_to_nvs(void)
